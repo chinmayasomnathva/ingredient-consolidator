@@ -19,6 +19,7 @@
             const [consolidated, setConsolidated] = useState([]);
             const [copyStatus, setCopyStatus] = useState('');
             const [summary, setSummary] = useState(null);
+            const [hasConversions, setHasConversions] = useState(false);
 
             function splitCommaDelimited(text) {
                 // Split by commas and create individual lines
@@ -26,54 +27,84 @@
             }
 
             function parseQuantity(text) {
-                // Handle ranges - always take upper limit
-                const rangeMatch = text.match(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/);
-                if (rangeMatch) {
-                    const upperLimit = parseFloat(rangeMatch[2]);
-                    text = text.replace(rangeMatch[0], upperLimit.toString());
-                }
-
                 const patterns = [
-                    /(\d+\.?\d*)\s*(lbs?|pounds?)/i,
-                    /(\d+\.?\d*)\s*(oz|ounces?)/i,
-                    /(\d+\.?\d*)\s*(gallons?)/i,
-                    /(\d+\.?\d*)\s*(cups?)/i,
-                    /(\d+\.?\d*)\s*(packs?|packets?)/i,
-                    /(\d+\.?\d*)\s*(jars?)/i,
-                    /(\d+\.?\d*)\s*(bottles?)/i,
-                    /(\d+\.?\d*)\s*(blocks?)/i,
-                    /(\d+\.?\d*)\s*(boxes?)/i,
-                    /(\d+\.?\d*)\s*(bunches?)/i,
-                    /(\d+\.?\d*)\s*(cartons?)/i,
-                    /(\d+\.?\d*)\s*(stalks?)/i,
-                    /(\d+\.?\d*)\s*(cloves?)/i,
-                    /(\d+\.?\d*)\s*(count)/i,
-                    /(\d+\.?\d*)\s*(cans?)/i,
-                    /(\d+\.?\d*)\s*(tins?)/i,
-                    /(\d+\.?\d*)\s*(bags?)/i,
-                    /(\d+\.?\d*)\s*(sticks?)/i,
+                    /(\d+\.?\d*)\s*(lbs?|pounds?)/gi,
+                    /(\d+\.?\d*)\s*(oz|ounces?)/gi,
+                    /(\d+\.?\d*)\s*(gallons?)/gi,
+                    /(\d+\.?\d*)\s*(cups?)/gi,
+                    /(\d+\.?\d*)\s*(packs?|packets?)/gi,
+                    /(\d+\.?\d*)\s*(jars?)/gi,
+                    /(\d+\.?\d*)\s*(bottles?)/gi,
+                    /(\d+\.?\d*)\s*(blocks?)/gi,
+                    /(\d+\.?\d*)\s*(boxes?)/gi,
+                    /(\d+\.?\d*)\s*(bunches?)/gi,
+                    /(\d+\.?\d*)\s*(cartons?)/gi,
+                    /(\d+\.?\d*)\s*(stalks?)/gi,
+                    /(\d+\.?\d*)\s*(cloves?)/gi,
+                    /(\d+\.?\d*)\s*(count)/gi,
+                    /(\d+\.?\d*)\s*(cans?)/gi,
+                    /(\d+\.?\d*)\s*(tins?)/gi,
+                    /(\d+\.?\d*)\s*(bags?)/gi,
+                    /(\d+\.?\d*)\s*(sticks?)/gi,
+                    /(\d+\.?\d*)\s*(gms?|grams?)/gi,
                 ];
 
+                // Find ALL matches and use the LAST one
+                let lastMatch = null;
+                let lastMatchIndex = -1;
                 for (let pattern of patterns) {
-                    const match = text.match(pattern);
-                    if (match) {
-                        return { quantity: parseFloat(match[1]), unit: match[2].toLowerCase() };
+                    const matches = [...text.matchAll(pattern)];
+                    if (matches.length > 0) {
+                        const match = matches[matches.length - 1];
+                        if (match.index > lastMatchIndex) {
+                            lastMatch = match;
+                            lastMatchIndex = match.index;
+                        }
                     }
                 }
 
-                const numMatch = text.match(/(\d+\.?\d*)/);
-                if (numMatch) {
-                    return { quantity: parseFloat(numMatch[1]), unit: 'count' };
+                if (lastMatch) {
+                    let quantity = parseFloat(lastMatch[1]);
+                    
+                    // Check if there's a range before this number (e.g., "5-6 cups")
+                    const beforeMatch = text.substring(0, lastMatch.index);
+                    const rangeMatch = beforeMatch.match(/(\d+\.?\d*)\s*-\s*$/);
+                    if (rangeMatch) {
+                        // Use the upper limit (the number we already found)
+                        quantity = parseFloat(lastMatch[1]);
+                    }
+                    
+                    return { quantity: quantity, unit: lastMatch[2].toLowerCase() };
                 }
 
-                return { quantity: 1, unit: 'count' };
+                // If no unit found, look for the last standalone number (with potential range)
+                const rangeMatch = text.match(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g);
+                if (rangeMatch) {
+                    const lastRange = rangeMatch[rangeMatch.length - 1];
+                    const rangeParts = lastRange.match(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/);
+                    return { quantity: parseFloat(rangeParts[2]), unit: 'count' };
+                }
+                
+                const allNumbers = [...text.matchAll(/(\d+\.?\d*)/g)];
+                if (allNumbers.length > 0) {
+                    const lastNumber = allNumbers[allNumbers.length - 1];
+                    return { quantity: parseFloat(lastNumber[1]), unit: 'count' };
+                }
+
+                // No quantity found - mark as pantry item
+                return { quantity: 0, unit: 'pantry' };
             }
 
-            function normalizeUnit(unit) {
+            function normalizeUnit(unit, quantity) {
+                // Convert cups to lbs (divide by 2)
+                if (unit === 'cup' || unit === 'cups') {
+                    return { unit: 'lbs', quantity: quantity / 2, converted: true };
+                }
+                
                 const unitMap = {
                     'lb': 'lbs', 'pound': 'lbs', 'pounds': 'lbs',
                     'oz': 'oz', 'ounce': 'oz', 'ounces': 'oz',
-                    'gallon': 'gallons', 'cup': 'cups',
+                    'gallon': 'gallons',
                     'pack': 'packs', 'packet': 'packs', 'packets': 'packs',
                     'jar': 'jars', 'bottle': 'bottles', 'block': 'blocks',
                     'box': 'boxes', 'bunch': 'bunches', 'carton': 'cartons',
@@ -82,8 +113,9 @@
                     'tin': 'tins', 'tins': 'tins',
                     'bag': 'bags', 'bags': 'bags',
                     'stick': 'sticks', 'sticks': 'sticks',
+                    'gm': 'gms', 'gms': 'gms', 'gram': 'gms', 'grams': 'gms',
                 };
-                return unitMap[unit] || unit;
+                return { unit: unitMap[unit] || unit, quantity: quantity, converted: false };
             }
 
             function normalizeIngredientName(name) {
@@ -93,17 +125,18 @@
                 normalized = normalized.replace(/-/g, ' ');
                 
                 const isPepper = normalized.includes('pepper') && !normalized.includes('crushed') && !normalized.includes('flakes');
+                const isBread = normalized.includes('bread') || normalized.includes('rice');
                 
                 const removeWords = [
                     'twin pack', 'costco', 'restaurant depot', 'trader joe',
                     'organic', 'extra virgin', 'virgin', 'unsalted', 'salted',
                     'fresh', 'frozen', 'canned',
                     'shredded', 'diced', 'chopped', 'sliced', 'whole', 'peeled',
-                    'flat leaf', 'baby', 'purée', 'puree',
+                    'flat leaf', 'baby', 'purée', 'puree', 'pantry',
                     '\\(.*?\\)'
                 ];
                 
-                if (!isPepper) {
+                if (!isPepper && !isBread) {
                     removeWords.push('red', 'green', 'yellow', 'white', 'black', 'purple');
                 }
                 
@@ -113,6 +146,9 @@
                 });
                 
                 normalized = normalized.replace(/\s+/g, ' ').trim();
+                
+                // Remove trailing hyphens, en-dashes, and em-dashes
+                normalized = normalized.replace(/[-–—]+$/, '').trim();
                 
                 // Handle "garlic cloves" -> "garlic"
                 normalized = normalized.replace(/\bgarlic\s+clove[s]?\b/gi, 'garlic');
@@ -126,10 +162,8 @@
                 };
                 
                 for (let [plural, singular] of Object.entries(pluralMap)) {
-                    if (normalized.endsWith(plural)) {
-                        normalized = normalized.replace(new RegExp(plural + '$'), singular);
-                        break;
-                    }
+                    const regex = new RegExp('\\b' + plural + '\\b', 'gi');
+                    normalized = normalized.replace(regex, singular);
                 }
                 
                 return normalized;
@@ -137,208 +171,215 @@
 
             function parseIngredientLine(line) {
                 line = line.replace(/[\u2060\u200B\u200C\u200D\uFEFF]/g, '');
-                line = line.replace(/^[•\-\*\s]+/, '').trim();
+                line = line.trim();
                 if (!line) return null;
-
-                // Check if this is a "pantry" item - FIXED: Check before parsing quantity
-                if (line.toLowerCase().includes('pantry')) {
-                    // Extract just the ingredient name without "pantry"
-                    let name = line.replace(/\bpantry\b/gi, '').trim();
-                    // Remove trailing dashes, hyphens, and extra spaces
-                    name = name.replace(/[-–—]+\s*$/g, '').trim();
-                    name = name.replace(/\s*[-–—]+$/g, '').trim();
-                    const cleanName = normalizeIngredientName(name || line);
-                    return {
-                        name: cleanName,
-                        quantity: null, // No quantity for pantry items
-                        unit: 'pantry',
-                        original: line,
-                        isPantry: true
-                    };
-                }
-
-                const quantityInfo = parseQuantity(line);
                 
+                // Remove bullet point formatting from the beginning
+                line = line.replace(/^[•\-\*]\s*/, '');  // Remove •, -, * bullets
+                line = line.replace(/^\d+[\.)]\s*/, '');  // Remove numbered lists like "1." or "1)"
+                line = line.trim();
+
+                const parsed = parseQuantity(line);
+                
+                // Remove the quantity and unit from the line to get the ingredient name
                 let ingredientName = line;
-                // Remove the quantity and unit from the name
-                const quantityPattern = /(\d+\.?\d*)(\s*-\s*\d+\.?\d*)?\s*[\w]+/;
-                const match = line.match(quantityPattern);
-                if (match) {
-                    ingredientName = line.replace(match[0], '').trim();
+                
+                if (parsed.quantity > 0) {
+                    // Find and remove only the LAST occurrence of number+unit (including ranges)
+                    const unitPattern = /(\d+\.?\d*\s*-\s*)?(\d+\.?\d*)\s*(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?)\b/gi;
+                    const matches = [...line.matchAll(unitPattern)];
+                    
+                    if (matches.length > 0) {
+                        const lastMatch = matches[matches.length - 1];
+                        const beforeMatch = line.substring(0, lastMatch.index);
+                        const afterMatch = line.substring(lastMatch.index + lastMatch[0].length);
+                        ingredientName = (beforeMatch + afterMatch).trim();
+                    } else {
+                        // No unit found, just remove the last standalone number or range
+                        const rangeMatches = [...line.matchAll(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g)];
+                        if (rangeMatches.length > 0) {
+                            const lastRangeMatch = rangeMatches[rangeMatches.length - 1];
+                            const beforeRange = line.substring(0, lastRangeMatch.index);
+                            const afterRange = line.substring(lastRangeMatch.index + lastRangeMatch[0].length);
+                            ingredientName = (beforeRange + afterRange).trim();
+                        } else {
+                            const numberMatches = [...line.matchAll(/(\d+\.?\d*)/g)];
+                            if (numberMatches.length > 0) {
+                                const lastNumMatch = numberMatches[numberMatches.length - 1];
+                                const beforeNum = line.substring(0, lastNumMatch.index);
+                                const afterNum = line.substring(lastNumMatch.index + lastNumMatch[0].length);
+                                ingredientName = (beforeNum + afterNum).trim();
+                            }
+                        }
+                    }
                 }
+
+                ingredientName = normalizeIngredientName(ingredientName);
                 
-                ingredientName = ingredientName.replace(/^[\s,\-]+/, '').trim();
-                
+                // Skip if we couldn't extract an ingredient name
+                if (!ingredientName || ingredientName.length === 0) {
+                    return null;
+                }
+
+                const normalized = normalizeUnit(parsed.unit, parsed.quantity);
+
                 return {
-                    name: normalizeIngredientName(ingredientName),
-                    quantity: quantityInfo.quantity,
-                    unit: normalizeUnit(quantityInfo.unit),
-                    original: line,
-                    isPantry: false
+                    normalized: ingredientName,
+                    quantity: normalized.quantity,
+                    unit: normalized.unit,
+                    isPantry: parsed.unit === 'pantry',
+                    converted: normalized.converted
                 };
             }
 
             function consolidateIngredients() {
-                const allIngredients = [];
+                const allIngredients = {};
                 const listStats = [];
+                let totalInputItems = 0;
+                let conversionsDetected = false;
 
-                lists.forEach((list, index) => {
+                lists.forEach((list, listIndex) => {
                     if (!list.trim()) return;
-                    
-                    const lines = list.split('\n');
+
                     let itemCount = 0;
+                    const lines = list.split('\n');
                     
                     lines.forEach(line => {
-                        const parsed = parseIngredientLine(line);
-                        if (parsed) {
-                            allIngredients.push(parsed);
-                            itemCount++;
+                        const ingredient = parseIngredientLine(line);
+                        if (!ingredient) return;
+
+                        itemCount++;
+                        totalInputItems++;
+                        
+                        if (ingredient.converted) {
+                            conversionsDetected = true;
                         }
+
+                        if (!allIngredients[ingredient.normalized]) {
+                            allIngredients[ingredient.normalized] = {
+                                quantities: {},
+                                isPantry: ingredient.isPantry,
+                                sources: []
+                            };
+                        }
+
+                        const entry = allIngredients[ingredient.normalized];
+                        
+                        // If this is a pantry item, mark it
+                        if (ingredient.isPantry) {
+                            entry.isPantry = true;
+                        } else {
+                            // Only add quantities if it's not a pantry item
+                            if (!entry.quantities[ingredient.unit]) {
+                                entry.quantities[ingredient.unit] = 0;
+                            }
+                            entry.quantities[ingredient.unit] += ingredient.quantity;
+                            entry.isPantry = false; // Override pantry status if we have actual quantities
+                        }
+                        
+                        entry.sources.push(listIndex + 1);
                     });
-                    
+
                     if (itemCount > 0) {
                         listStats.push({
-                            listNumber: index + 1,
+                            listNumber: listIndex + 1,
                             itemCount: itemCount
                         });
                     }
                 });
 
-                const grouped = {};
-                allIngredients.forEach(item => {
-                    const key = item.name;
-                    if (!grouped[key]) {
-                        grouped[key] = {
-                            name: item.name,
-                            items: [],
-                            isPantry: item.isPantry
-                        };
-                    }
-                    // If any instance is pantry, mark the whole group as pantry
-                    if (item.isPantry) {
-                        grouped[key].isPantry = true;
-                    }
-                    grouped[key].items.push(item);
-                });
+                setHasConversions(conversionsDetected);
 
-                const result = Object.values(grouped).map(group => {
-                    // FIXED: Handle pantry items specially - consolidate all to single "pantry"
-                    if (group.isPantry) {
+                const result = Object.keys(allIngredients)
+                    .sort()
+                    .map(name => {
+                        const item = allIngredients[name];
+                        
+                        if (item.isPantry) {
+                            return {
+                                name: name,
+                                count: 'pantry',
+                                isPantry: true,
+                                wasCombined: item.sources.length > 1
+                            };
+                        }
+
+                        const quantityStrings = Object.entries(item.quantities)
+                            .map(([unit, qty]) => {
+                                return `${qty} ${unit}`;
+                            });
+
                         return {
-                            name: group.name,
-                            count: 'pantry',
-                            wasCombined: group.items.length > 1,
-                            isPantry: true
+                            name: name,
+                            count: quantityStrings.join(', '),
+                            isPantry: false,
+                            wasCombined: item.sources.length > 1
                         };
-                    }
-                    
-                    const unitGroups = {};
-                    group.items.forEach(item => {
-                        if (!item.isPantry) { // Only count non-pantry items
-                            if (!unitGroups[item.unit]) {
-                                unitGroups[item.unit] = 0;
-                            }
-                            unitGroups[item.unit] += item.quantity;
-                        }
+                    })
+                    .sort((a, b) => {
+                        // Sort pantry items to the bottom
+                        if (a.isPantry && !b.isPantry) return 1;
+                        if (!a.isPantry && b.isPantry) return -1;
+                        return a.name.localeCompare(b.name);
                     });
-
-                    const countParts = Object.entries(unitGroups).map(([unit, qty]) => {
-                        if (unit === 'count') {
-                            return qty.toString();
-                        }
-                        return `${qty} ${unit}`;
-                    });
-
-                    return {
-                        name: group.name,
-                        count: countParts.join(' + '),
-                        wasCombined: group.items.length > 1,
-                        isPantry: false
-                    };
-                });
-
-                // FIXED: Sort pantry items to the bottom
-                result.sort((a, b) => {
-                    // If one is pantry and the other isn't, pantry goes to bottom
-                    if (a.isPantry && !b.isPantry) return 1;
-                    if (!a.isPantry && b.isPantry) return -1;
-                    // Otherwise sort alphabetically
-                    return a.name.localeCompare(b.name);
-                });
-
-                const totalInputItems = allIngredients.length;
-                const consolidatedCount = result.length;
-                const itemsSaved = totalInputItems - consolidatedCount;
-
-                setSummary({
-                    listStats,
-                    totalInputItems,
-                    consolidatedCount,
-                    itemsSaved
-                });
 
                 setConsolidated(result);
+                setSummary({
+                    listStats: listStats,
+                    totalInputItems: totalInputItems,
+                    consolidatedCount: result.length,
+                    itemsSaved: totalInputItems - result.length
+                });
             }
 
             function copyToGoogleSheets() {
-                const sheetData = consolidated.map(item => `${item.name}\t${item.count}`).join('\n');
-                const header = 'Items\tUnits\n';
-                const fullData = header + sheetData;
-                
-                navigator.clipboard.writeText(fullData).then(() => {
+                const headers = ['Items', 'Units'];
+                const rows = consolidated.map(item => [item.name, item.count]);
+                const tsvContent = [headers, ...rows].map(row => row.join('\t')).join('\n');
+
+                navigator.clipboard.writeText(tsvContent).then(() => {
                     setCopyStatus('✓ Copied! Paste into Google Sheets');
                     setTimeout(() => setCopyStatus(''), 3000);
                 }).catch(() => {
-                    setCopyStatus('❌ Failed to copy');
+                    setCopyStatus('Failed to copy');
                     setTimeout(() => setCopyStatus(''), 3000);
                 });
             }
 
-            // FIXED: Add function to add new lists
             function addNewList() {
                 setLists([...lists, '']);
             }
 
-            // FIXED: Add function to remove a list
             function removeList(index) {
-                if (lists.length > 1) {
-                    const newLists = lists.filter((_, i) => i !== index);
-                    setLists(newLists);
-                }
+                if (lists.length <= 1) return;
+                const newLists = lists.filter((_, i) => i !== index);
+                setLists(newLists);
             }
 
             return (
-                <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
-                    <div className="container mx-auto px-4 py-8 max-w-6xl">
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 py-8 px-4">
+                    <div className="max-w-6xl mx-auto">
                         <div className="text-center mb-8">
                             <h1 className="text-4xl font-bold text-gray-800 mb-2">🛒 Ingredient List Consolidator</h1>
-                            <p className="text-gray-600 mb-6">Paste your ingredient lists and consolidate them</p>
+                            <p className="text-gray-600">Combine multiple ingredient lists into one organized shopping list</p>
+                        </div>
 
-                            <div className="space-y-4 mb-6">
+                        <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
                                 {lists.map((list, index) => (
-                                    <div key={index}>
+                                    <div key={index} className="relative">
                                         <div className="flex justify-between items-center mb-2">
-                                            <label className="font-semibold text-gray-700">List {index + 1}</label>
-                                            <div className="flex gap-2">
+                                            <label className="block text-sm font-semibold text-gray-700">
+                                                List {index + 1}
+                                            </label>
+                                            {lists.length > 1 && (
                                                 <button
-                                                    onClick={() => {
-                                                        const newLists = [...lists];
-                                                        newLists[index] = splitCommaDelimited(list);
-                                                        setLists(newLists);
-                                                    }}
-                                                    className="text-sm px-3 py-1 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded transition-colors"
+                                                    onClick={() => removeList(index)}
+                                                    className="text-red-500 hover:text-red-700 text-sm font-medium"
                                                 >
-                                                    Split by Commas
+                                                    Remove
                                                 </button>
-                                                {lists.length > 1 && (
-                                                    <button
-                                                        onClick={() => removeList(index)}
-                                                        className="text-sm px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded transition-colors"
-                                                    >
-                                                        Remove
-                                                    </button>
-                                                )}
-                                            </div>
+                                            )}
                                         </div>
                                         <textarea
                                             value={list}
@@ -415,6 +456,11 @@
 
                         {consolidated.length > 0 && (
                             <div className="bg-white rounded-xl shadow-lg p-8">
+                                {hasConversions && (
+                                    <div className="mb-4 text-xs text-gray-500 italic">
+                                        Note: Cups have been converted to lbs (1 cup = 0.5 lbs)
+                                    </div>
+                                )}
                                 <div className="flex justify-between items-center mb-6">
                                     <div>
                                         <h2 className="text-2xl font-bold text-gray-800">Shopping List</h2>
