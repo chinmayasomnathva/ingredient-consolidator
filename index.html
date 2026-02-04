@@ -126,6 +126,8 @@
                 
                 const isPepper = normalized.includes('pepper') && !normalized.includes('crushed') && !normalized.includes('flakes');
                 const isBread = normalized.includes('bread') || normalized.includes('rice');
+                const isChili = normalized.includes('chili') || normalized.includes('chilli');
+                const isApple = normalized.includes('apple');
                 
                 const removeWords = [
                     'twin pack', 'costco', 'restaurant depot', 'trader joe',
@@ -136,7 +138,7 @@
                     '\\(.*?\\)'
                 ];
                 
-                if (!isPepper && !isBread) {
+                if (!isPepper && !isBread && !isChili && !isApple) {
                     removeWords.push('red', 'green', 'yellow', 'white', 'black', 'purple');
                 }
                 
@@ -237,6 +239,29 @@
                 const listStats = [];
                 let totalInputItems = 0;
                 let conversionsDetected = false;
+                
+                // Restaurant Depot items list (quantity > 5 lbs required)
+                const rdItemsWithLimit = [
+                    'basmati rice', 'rice', 'tomato', 'onion',
+                    'green pepper', 'pepper', 'cilantro', 'zucchini',
+                    'red pepper', 'english cucumber', 'cucumber', 'carrot',
+                    'potato', 'yogurt'
+                ];
+                
+                // Restaurant Depot herbs (no quantity limit)
+                const rdHerbs = ['mint', 'basil', 'bay leaf', 'leaf'];
+                
+                // Costco items list (any quantity)
+                const costcoItems = [
+                    'pomegranate', 'burger bun', 'bun', 'milk', 'butter', 
+                    'sugar', 'paprika', 'centos tomato', 'canned tomato', 'cheese'
+                ];
+                
+                // Patel Brothers items list (any quantity)
+                const patelItems = [
+                    'roti', 'pav', 'frozen coconut', 'coconut', 
+                    'frozen kathal', 'kathal', 'dates chutney', 'chutney'
+                ];
 
                 lists.forEach((list, listIndex) => {
                     if (!list.trim()) return;
@@ -300,7 +325,8 @@
                                 name: name,
                                 count: 'pantry',
                                 isPantry: true,
-                                wasCombined: item.sources.length > 1
+                                wasCombined: item.sources.length > 1,
+                                shop: ''
                             };
                         }
 
@@ -309,17 +335,59 @@
                                 return `${qty} ${unit}`;
                             });
 
+                        // Check if this item qualifies for specific shops
+                        let shop = 'Lotte'; // Default shop
+                        
+                        // Check Patel Brothers (highest priority for specific items)
+                        const isPatelItem = patelItems.some(patelItem => name.includes(patelItem));
+                        if (isPatelItem) {
+                            shop = 'Patel';
+                        }
+                        
+                        // Check Costco
+                        if (shop === 'Lotte') {
+                            const isCostcoItem = costcoItems.some(costcoItem => name.includes(costcoItem));
+                            if (isCostcoItem) {
+                                shop = 'Costco';
+                            }
+                        }
+                        
+                        // Check RD herbs (no quantity limit)
+                        if (shop === 'Lotte') {
+                            const isRdHerb = rdHerbs.some(herb => name.includes(herb));
+                            if (isRdHerb) {
+                                shop = 'RD';
+                            }
+                        }
+                        
+                        // Check RD items with >5 lbs requirement
+                        if (shop === 'Lotte') {
+                            const isRdItem = rdItemsWithLimit.some(rdItem => name.includes(rdItem));
+                            if (isRdItem) {
+                                const lbsQty = item.quantities['lbs'] || 0;
+                                if (lbsQty > 5) {
+                                    shop = 'RD';
+                                }
+                            }
+                        }
+
                         return {
                             name: name,
                             count: quantityStrings.join(', '),
                             isPantry: false,
-                            wasCombined: item.sources.length > 1
+                            wasCombined: item.sources.length > 1,
+                            shop: shop
                         };
                     })
                     .sort((a, b) => {
-                        // Sort pantry items to the bottom
+                        // Pantry items always at the bottom
                         if (a.isPantry && !b.isPantry) return 1;
                         if (!a.isPantry && b.isPantry) return -1;
+                        
+                        // For non-pantry items, sort by shop first, then by name
+                        if (a.shop !== b.shop) {
+                            return a.shop.localeCompare(b.shop);
+                        }
                         return a.name.localeCompare(b.name);
                     });
 
@@ -333,8 +401,8 @@
             }
 
             function copyToGoogleSheets() {
-                const headers = ['Items', 'Units'];
-                const rows = consolidated.map(item => [item.name, item.count]);
+                const headers = ['Items', 'Units', 'Shop'];
+                const rows = consolidated.map(item => [item.name, item.count, item.shop]);
                 const tsvContent = [headers, ...rows].map(row => row.join('\t')).join('\n');
 
                 navigator.clipboard.writeText(tsvContent).then(() => {
@@ -494,6 +562,7 @@
                                         <tr className="bg-gray-100">
                                             <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Items</th>
                                             <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Units</th>
+                                            <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Shop</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -508,6 +577,7 @@
                                                 <tr key={index} className={rowClass}>
                                                     <td className="border border-gray-300 px-4 py-2">{item.name}</td>
                                                     <td className="border border-gray-300 px-4 py-2">{item.count}</td>
+                                                    <td className="border border-gray-300 px-4 py-2">{item.shop}</td>
                                                 </tr>
                                             );
                                         })}
