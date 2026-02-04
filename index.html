@@ -124,21 +124,27 @@
                 // Remove dashes
                 normalized = normalized.replace(/-/g, ' ');
                 
+                // Check for items that should keep color adjectives BEFORE removing other words
                 const isPepper = normalized.includes('pepper') && !normalized.includes('crushed') && !normalized.includes('flakes');
                 const isBread = normalized.includes('bread') || normalized.includes('rice');
                 const isChili = normalized.includes('chili') || normalized.includes('chilli');
                 const isApple = normalized.includes('apple');
+                const isOnion = normalized.includes('onion');
+                const isTomato = normalized.includes('tomato');
+                const isBellPepper = normalized.includes('bell');
+                const isPeas = normalized.includes('peas') || normalized.includes('vatana');
+                const isPumpkin = normalized.includes('pumpkin') || normalized.includes('guard');
                 
                 const removeWords = [
                     'twin pack', 'costco', 'restaurant depot', 'trader joe',
                     'organic', 'extra virgin', 'virgin', 'unsalted', 'salted',
                     'fresh', 'frozen', 'canned',
                     'shredded', 'diced', 'chopped', 'sliced', 'whole', 'peeled',
-                    'flat leaf', 'baby', 'purée', 'puree', 'pantry',
-                    '\\(.*?\\)'
+                    'flat leaf', 'baby', 'purée', 'puree', 'pantry'
                 ];
                 
-                if (!isPepper && !isBread && !isChili && !isApple) {
+                // Only remove colors if the ingredient is NOT one that needs color preservation
+                if (!isPepper && !isBread && !isChili && !isApple && !isOnion && !isTomato && !isBellPepper && !isPeas && !isPumpkin) {
                     removeWords.push('red', 'green', 'yellow', 'white', 'black', 'purple');
                 }
                 
@@ -147,10 +153,12 @@
                     normalized = normalized.replace(regex, '');
                 });
                 
+                // Normalize slashes and spaces for consolidation
+                normalized = normalized.replace(/\s*\/\s*/g, '/'); // Remove spaces around slashes
                 normalized = normalized.replace(/\s+/g, ' ').trim();
-                
-                // Remove trailing hyphens, en-dashes, and em-dashes
-                normalized = normalized.replace(/[-–—]+$/, '').trim();
+                normalized = normalized.replace(/\s*–\s*/g, ' '); // Normalize en-dashes to spaces
+                normalized = normalized.replace(/\s*-\s*/g, ' '); // Normalize hyphens to spaces (between words)
+                normalized = normalized.replace(/\s+/g, ' ').trim(); // Clean up multiple spaces again
                 
                 // Handle "garlic cloves" -> "garlic"
                 normalized = normalized.replace(/\bgarlic\s+clove[s]?\b/gi, 'garlic');
@@ -254,7 +262,8 @@
                 // Costco items list (any quantity)
                 const costcoItems = [
                     'pomegranate', 'burger bun', 'bun', 'milk', 'butter', 
-                    'sugar', 'paprika', 'centos tomato', 'canned tomato', 'cheese'
+                    'sugar', 'paprika', 'centos tomato', 'canned tomato', 'cheese',
+                    'tortilla', 'uncooked roti', 'bread'
                 ];
                 
                 // Patel Brothers items list (any quantity)
@@ -262,6 +271,20 @@
                     'roti', 'pav', 'frozen coconut', 'coconut', 
                     'frozen kathal', 'kathal', 'dates chutney', 'chutney'
                 ];
+
+                // Add line numbers to each list after consolidation
+                const numberedLists = lists.map(list => {
+                    if (!list.trim()) return list;
+                    const lines = list.split('\n');
+                    let lineNumber = 1;
+                    return lines.map(line => {
+                        if (line.trim()) {
+                            return `${lineNumber++}. ${line}`;
+                        }
+                        return ''; // Return empty string for blank lines
+                    }).filter(line => line !== '').join('\n'); // Filter out empty lines
+                });
+                setLists(numberedLists);
 
                 lists.forEach((list, listIndex) => {
                     if (!list.trim()) return;
@@ -339,14 +362,21 @@
                         let shop = 'Lotte'; // Default shop
                         
                         // Check Patel Brothers (highest priority for specific items)
-                        const isPatelItem = patelItems.some(patelItem => name.includes(patelItem));
+                        const isPatelItem = patelItems.some(patelItem => {
+                            const regex = new RegExp('\\b' + patelItem + '\\b', 'i');
+                            return regex.test(name);
+                        });
                         if (isPatelItem) {
                             shop = 'Patel';
                         }
                         
                         // Check Costco
                         if (shop === 'Lotte') {
-                            const isCostcoItem = costcoItems.some(costcoItem => name.includes(costcoItem));
+                            const isCostcoItem = costcoItems.some(costcoItem => {
+                                // Check if the costco item appears as a complete word or at word boundaries
+                                const regex = new RegExp('\\b' + costcoItem + '\\b', 'i');
+                                return regex.test(name);
+                            });
                             if (isCostcoItem) {
                                 shop = 'Costco';
                             }
@@ -354,7 +384,10 @@
                         
                         // Check RD herbs (no quantity limit)
                         if (shop === 'Lotte') {
-                            const isRdHerb = rdHerbs.some(herb => name.includes(herb));
+                            const isRdHerb = rdHerbs.some(herb => {
+                                const regex = new RegExp('\\b' + herb + '\\b', 'i');
+                                return regex.test(name);
+                            });
                             if (isRdHerb) {
                                 shop = 'RD';
                             }
@@ -362,7 +395,10 @@
                         
                         // Check RD items with >5 lbs requirement
                         if (shop === 'Lotte') {
-                            const isRdItem = rdItemsWithLimit.some(rdItem => name.includes(rdItem));
+                            const isRdItem = rdItemsWithLimit.some(rdItem => {
+                                const regex = new RegExp('\\b' + rdItem + '\\b', 'i');
+                                return regex.test(name);
+                            });
                             if (isRdItem) {
                                 const lbsQty = item.quantities['lbs'] || 0;
                                 if (lbsQty > 5) {
@@ -456,7 +492,7 @@
                                                 newLists[index] = e.target.value;
                                                 setLists(newLists);
                                             }}
-                                            placeholder="Paste ingredients here line-separated..."
+                                            placeholder="Paste ingredients here (line-separated)..."
                                             className="w-full h-32 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                         />
                                     </div>
@@ -537,6 +573,8 @@
                                             Consolidated items
                                             <span className="inline-block w-4 h-4 bg-amber-50 border border-amber-300 ml-3 mr-1"></span>
                                             Pantry items
+                                            <span className="inline-block w-4 h-4 bg-amber-200 border border-amber-400 ml-3 mr-1"></span>
+                                            Combined pantry items
                                         </p>
                                     </div>
                                     <div className="flex flex-col items-end gap-2">
@@ -569,7 +607,11 @@
                                         {consolidated.map((item, index) => {
                                             let rowClass = "hover:bg-gray-50";
                                             if (item.isPantry) {
-                                                rowClass = "bg-amber-50 border-l-4 border-l-amber-500";
+                                                if (item.wasCombined) {
+                                                    rowClass = "bg-amber-200 border-l-4 border-l-amber-600";
+                                                } else {
+                                                    rowClass = "bg-amber-50 border-l-4 border-l-amber-500";
+                                                }
                                             } else if (item.wasCombined) {
                                                 rowClass = "bg-green-100 border-l-4 border-l-green-500";
                                             }
