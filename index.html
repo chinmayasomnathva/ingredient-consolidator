@@ -188,41 +188,53 @@
                 line = line.replace(/^[•\-\*]\s*/, '');  // Remove •, -, * bullets
                 line = line.replace(/^\d+[\.)]\s*/, '');  // Remove numbered lists like "1." or "1)"
                 line = line.trim();
+                
+                // Temporarily replace content in parentheses to protect it
+                const parenContents = [];
+                let protectedLine = line.replace(/\([^)]+\)/g, (match) => {
+                    parenContents.push(match);
+                    return `__PAREN_${parenContents.length - 1}__`;
+                });
 
-                const parsed = parseQuantity(line);
+                const parsed = parseQuantity(protectedLine);
                 
                 // Remove the quantity and unit from the line to get the ingredient name
-                let ingredientName = line;
+                let ingredientName = protectedLine;
                 
                 if (parsed.quantity > 0) {
                     // Find and remove only the LAST occurrence of number+unit (including ranges)
                     const unitPattern = /(\d+\.?\d*\s*-\s*)?(\d+\.?\d*)\s*(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?)\b/gi;
-                    const matches = [...line.matchAll(unitPattern)];
+                    const matches = [...protectedLine.matchAll(unitPattern)];
                     
                     if (matches.length > 0) {
                         const lastMatch = matches[matches.length - 1];
-                        const beforeMatch = line.substring(0, lastMatch.index);
-                        const afterMatch = line.substring(lastMatch.index + lastMatch[0].length);
+                        const beforeMatch = protectedLine.substring(0, lastMatch.index);
+                        const afterMatch = protectedLine.substring(lastMatch.index + lastMatch[0].length);
                         ingredientName = (beforeMatch + afterMatch).trim();
                     } else {
                         // No unit found, just remove the last standalone number or range
-                        const rangeMatches = [...line.matchAll(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g)];
+                        const rangeMatches = [...protectedLine.matchAll(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g)];
                         if (rangeMatches.length > 0) {
                             const lastRangeMatch = rangeMatches[rangeMatches.length - 1];
-                            const beforeRange = line.substring(0, lastRangeMatch.index);
-                            const afterRange = line.substring(lastRangeMatch.index + lastRangeMatch[0].length);
+                            const beforeRange = protectedLine.substring(0, lastRangeMatch.index);
+                            const afterRange = protectedLine.substring(lastRangeMatch.index + lastRangeMatch[0].length);
                             ingredientName = (beforeRange + afterRange).trim();
                         } else {
-                            const numberMatches = [...line.matchAll(/(\d+\.?\d*)/g)];
+                            const numberMatches = [...protectedLine.matchAll(/(\d+\.?\d*)/g)];
                             if (numberMatches.length > 0) {
                                 const lastNumMatch = numberMatches[numberMatches.length - 1];
-                                const beforeNum = line.substring(0, lastNumMatch.index);
-                                const afterNum = line.substring(lastNumMatch.index + lastNumMatch[0].length);
+                                const beforeNum = protectedLine.substring(0, lastNumMatch.index);
+                                const afterNum = protectedLine.substring(lastNumMatch.index + lastNumMatch[0].length);
                                 ingredientName = (beforeNum + afterNum).trim();
                             }
                         }
                     }
                 }
+                
+                // Restore parentheses content
+                ingredientName = ingredientName.replace(/__PAREN_(\d+)__/g, (match, index) => {
+                    return parenContents[parseInt(index)];
+                });
 
                 ingredientName = normalizeIngredientName(ingredientName);
                 
@@ -257,7 +269,7 @@
                 ];
                 
                 // Restaurant Depot herbs (no quantity limit)
-                const rdHerbs = ['mint', 'basil', 'bay leaf', 'leaf'];
+                const rdHerbs = ['mint', 'basil', 'bay leaf'];
                 
                 // Costco items list (any quantity)
                 const costcoItems = [
