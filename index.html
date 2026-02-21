@@ -12,7 +12,7 @@
 <body>
     <div id="root"></div>
     <script type="text/babel">
-        const { useState } = React;
+        const { useState, useEffect } = React;
 
         function IngredientConsolidator() {
             const [lists, setLists] = useState(['', '', '']);
@@ -20,10 +20,299 @@
             const [copyStatus, setCopyStatus] = useState('');
             const [summary, setSummary] = useState(null);
             const [hasConversions, setHasConversions] = useState(false);
+            const [apiKey, setApiKey] = useState(localStorage.getItem('googleSheetsApiKey') || '');
+            const [masterData, setMasterData] = useState(null);
+            const [loadingMaster, setLoadingMaster] = useState(false);
+            const [masterError, setMasterError] = useState('');
+            const [matchSuggestions, setMatchSuggestions] = useState([]);
+            const [showMatchModal, setShowMatchModal] = useState(false);
+            const [pendingMatches, setPendingMatches] = useState({});
 
-            function splitCommaDelimited(text) {
-                // Split by commas and create individual lines
-                return text.split(',').map(item => item.trim()).filter(item => item.length > 0).join('\n');
+            const SHEET_ID = '1yJyhd23X77zH_ITtQu1AtNTI-Ak9KnorymsPJgEJKMc';
+            const SHEET_NAME = 'Master List_Annapurna'; // Adjust if needed
+            const API_KEY = 'AIzaSyAxFgijOuH0PeE-wmK3DBG2XqmHNnnabyE'; // Set your Google Sheets API key here
+            
+
+            // Load master data on mount if API key is set
+            useEffect(() => {
+                if (API_KEY) {
+                    setApiKey(API_KEY);
+                }
+            }, []);
+
+            // Load master data when API key changes
+            useEffect(() => {
+                if (apiKey) {
+                    loadMasterData();
+                }
+            }, [apiKey]);
+
+            async function loadMasterData() {
+                setLoadingMaster(true);
+                setMasterError('');
+                
+                try {
+                    const range = `${SHEET_NAME}!A:F`; // Items, Default Unit, Preferred Brand, Category, Preferred Store, Alt Store
+                    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Master_Items?key=${apiKey}`;
+                    
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch master data. Check your API key.');
+                    }
+                    
+                    const data = await response.json();
+                    const rows = data.values || [];
+                    
+                    // Skip header row, create master lookup with category grouping
+                    const masterLookup = {};
+                    const categoryIndex = {};
+                    
+                    for (let i = 1; i < rows.length; i++) {
+                        const [item, defaultUnit, preferredBrand, category, preferredStore, altStore] = rows[i];
+                        if (item) {
+                            const itemLower = item.toLowerCase().trim();
+                            const categoryLower = (category || '').toLowerCase().trim();
+                            
+                            masterLookup[itemLower] = {
+                                item: item,
+                                defaultUnit: defaultUnit || '',
+                                preferredBrand: preferredBrand || '',
+                                category: category || '',
+                                preferredStore: preferredStore || '',
+                                altStore: altStore || ''
+                            };
+                            
+                            // Build category index for context-aware matching
+                            if (categoryLower) {
+                                if (!categoryIndex[categoryLower]) {
+                                    categoryIndex[categoryLower] = [];
+                                }
+                                categoryIndex[categoryLower].push({
+                                    key: itemLower,
+                                    data: masterLookup[itemLower]
+                                });
+                            }
+                        }
+                    }
+                    
+                    setMasterData({ lookup: masterLookup, categoryIndex: categoryIndex });
+                    setLoadingMaster(false);
+                } catch (error) {
+                    setMasterError(error.message);
+                    setLoadingMaster(false);
+                }
+            }
+
+            function saveApiKey() {
+                localStorage.setItem('googleSheetsApiKey', apiKey);
+                loadMasterData();
+            }
+
+            // Enhanced fuzzy matching with category context and synonym support
+            function fuzzyMatchWithCategory(input, masterData, threshold = 0.5) {
+                const inputLower = input.toLowerCase();
+                const { lookup, categoryIndex } = masterData;
+                const matches = [];
+                
+                // Synonym mapping for common ingredient variations
+                const synonyms = {
+                    'coriander': 'cilantro',
+                    'coriander leaf': 'cilantro',
+                    'curry leaf': 'curry leaves',
+                    'tomato': 'tomatoes'
+                };
+                
+                // Check if input has a known synonym
+                let searchTerm = inputLower;
+                for (const [key, value] of Object.entries(synonyms)) {
+                    if (inputLower.includes(key)) {
+                        searchTerm = inputLower.replace(key, value);
+                        break;
+                    }
+                }
+                
+                // Extract main noun (last word) and adjectives (other words)
+                const inputWords = searchTerm.split(/\s+/);
+                const inputNoun = inputWords[inputWords.length - 1]; // e.g., "chana" from "black chana"
+                const inputAdjectives = inputWords.slice(0, -1); // e.g., ["black"] from "black chana"
+                
+                // First pass: Look for matches and determine likely category
+                let likelyCategory = null;
+                let maxInitialSimilarity = 0;
+                
+                for (const [key, data] of Object.entries(lookup)) {
+                    const similarity = calculateSimilarity(searchTerm, key);
+                    if (similarity > maxInitialSimilarity) {
+                        maxInitialSimilarity = similarity;
+                        likelyCategory = data.category.toLowerCase();
+                    }
+                }
+                
+                // Second pass: Score matches with category boost and noun-based matching
+                for (const [key, data] of Object.entries(lookup)) {
+                    let similarity = calculateSimilarity(searchTerm, key);
+                    
+                    // Boost matches that contain the main noun
+                    const masterWords = key.split(/\s+/);
+                    const masterNoun = masterWords[masterWords.length - 1];
+                    
+                    // If master item contains the input noun, boost similarity
+                    if (key.includes(inputNoun)) {
+                        similarity = Math.min(1.0, similarity * 1.2); // 20% boost for noun match
+                    }
+                    
+                    // Boost similarity if in the same category as the likely match
+                    if (likelyCategory && data.category.toLowerCase() === likelyCategory) {
+                        similarity = Math.min(1.0, similarity * 1.3); // 30% boost for same category
+                    }
+                    
+                    if (similarity >= threshold) {
+                        matches.push({ 
+                            key, 
+                            data, 
+                            similarity,
+                            categoryMatch: data.category.toLowerCase() === likelyCategory,
+                            nounMatch: key.includes(inputNoun)
+                        });
+                    }
+                }
+                
+                // Sort by: noun match first, then similarity, then category match
+                return matches.sort((a, b) => {
+                    // Prioritize noun matches
+                    if (a.nounMatch && !b.nounMatch) return -1;
+                    if (!a.nounMatch && b.nounMatch) return 1;
+                    
+                    // Then by similarity
+                    if (Math.abs(a.similarity - b.similarity) > 0.05) {
+                        return b.similarity - a.similarity;
+                    }
+                    
+                    // Then by category match
+                    if (a.categoryMatch && !b.categoryMatch) return -1;
+                    if (!a.categoryMatch && b.categoryMatch) return 1;
+                    
+                    return 0;
+                }).slice(0, 8); // Show up to 8 matches
+            }
+
+            // Simple similarity calculation (Levenshtein-inspired)
+            function calculateSimilarity(str1, str2) {
+                const longer = str1.length > str2.length ? str1 : str2;
+                const shorter = str1.length > str2.length ? str2 : str1;
+                
+                if (longer.length === 0) return 1.0;
+                
+                // Handle common singular/plural variations
+                const singularToPlural = {
+                    'tomato': 'tomatoes', 'potato': 'potatoes', 'leaf': 'leaves', 'leaves': 'leaves'
+                };
+                const pluralToSingular = {
+                    'tomatoes': 'tomato', 'potatoes': 'potato', 'leaves': 'leaf'
+                };
+                
+                // Check if one is singular and other is plural of same word
+                if (singularToPlural[shorter] === longer || pluralToSingular[shorter] === longer ||
+                    singularToPlural[longer] === shorter || pluralToSingular[longer] === shorter) {
+                    return 0.95; // High similarity for singular/plural pairs
+                }
+                
+                // Split into words for analysis
+                const shorterWords = shorter.split(/\s+/);
+                const longerWords = longer.split(/\s+/);
+                
+                // Check for word overlap - at least one main word should match
+                const commonWords = shorterWords.filter(word => 
+                    longerWords.some(lw => {
+                        // Also check singular/plural forms
+                        return lw.includes(word) || word.includes(lw) || 
+                               singularToPlural[word] === lw || pluralToSingular[word] === lw ||
+                               singularToPlural[lw] === word || pluralToSingular[lw] === word;
+                    })
+                );
+                
+                // If no common words at all, very low similarity
+                if (commonWords.length === 0) {
+                    return 0.3;
+                }
+                
+                // Check if shorter is contained in longer
+                if (longer.includes(shorter)) {
+                    // If input (shorter) is a complete word match in master (longer)
+                    
+                    // If input is single word and master has multiple words
+                    if (shorterWords.length === 1 && longerWords.length > 1) {
+                        // Check if the single word is an exact match to one of the words (or singular/plural)
+                        const exactWordMatch = longerWords.some(word => {
+                            return word === shorter || 
+                                   singularToPlural[shorter] === word || 
+                                   pluralToSingular[shorter] === word;
+                        });
+                        
+                        if (exactWordMatch) {
+                            // Check if other words are descriptors
+                            const otherWords = longerWords.filter(word => 
+                                word !== shorter && 
+                                singularToPlural[shorter] !== word && 
+                                pluralToSingular[shorter] !== word
+                            );
+                            const descriptors = ['frozen', 'fresh', 'canned', 'dried', 'raw', 'cooked', 
+                                               'baby', 'red', 'white', 'green', 'yellow', 'black', 
+                                               'organic', 'large', 'small', 'whole', 'chopped', 'diced',
+                                               'sliced', 'ground'];
+                            const hasOnlyDescriptors = otherWords.every(word => descriptors.includes(word.toLowerCase()));
+                            
+                            if (hasOnlyDescriptors) {
+                                // "spinach" → "baby spinach" or "onion" → "red onion"
+                                return 0.80; // High enough to show in resolution but not auto-match
+                            } else {
+                                // "potato" → "potato chips" (chips is not a descriptor)
+                                return 0.60;
+                            }
+                        } else {
+                            return 0.5;
+                        }
+                    }
+                    
+                    // If word counts are the same or similar, high score
+                    if (Math.abs(shorterWords.length - longerWords.length) <= 1) {
+                        return 0.9;
+                    }
+                    
+                    return 0.8;
+                }
+                
+                // Calculate edit distance
+                const editDistance = levenshteinDistance(str1, str2);
+                return (longer.length - editDistance) / longer.length;
+            }
+
+            function levenshteinDistance(str1, str2) {
+                const matrix = [];
+                
+                for (let i = 0; i <= str2.length; i++) {
+                    matrix[i] = [i];
+                }
+                
+                for (let j = 0; j <= str1.length; j++) {
+                    matrix[0][j] = j;
+                }
+                
+                for (let i = 1; i <= str2.length; i++) {
+                    for (let j = 1; j <= str1.length; j++) {
+                        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+                            matrix[i][j] = matrix[i - 1][j - 1];
+                        } else {
+                            matrix[i][j] = Math.min(
+                                matrix[i - 1][j - 1] + 1,
+                                matrix[i][j - 1] + 1,
+                                matrix[i - 1][j] + 1
+                            );
+                        }
+                    }
+                }
+                
+                return matrix[str2.length][str1.length];
             }
 
             function parseQuantity(text) {
@@ -49,7 +338,6 @@
                     /(\d+\.?\d*)\s*(gms?|grams?)/gi,
                 ];
 
-                // Find ALL matches and use the LAST one
                 let lastMatch = null;
                 let lastMatchIndex = -1;
                 for (let pattern of patterns) {
@@ -65,19 +353,14 @@
 
                 if (lastMatch) {
                     let quantity = parseFloat(lastMatch[1]);
-                    
-                    // Check if there's a range before this number (e.g., "5-6 cups")
                     const beforeMatch = text.substring(0, lastMatch.index);
                     const rangeMatch = beforeMatch.match(/(\d+\.?\d*)\s*-\s*$/);
                     if (rangeMatch) {
-                        // Use the upper limit (the number we already found)
                         quantity = parseFloat(lastMatch[1]);
                     }
-                    
                     return { quantity: quantity, unit: lastMatch[2].toLowerCase() };
                 }
 
-                // If no unit found, look for the last standalone number (with potential range)
                 const rangeMatch = text.match(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g);
                 if (rangeMatch) {
                     const lastRange = rangeMatch[rangeMatch.length - 1];
@@ -91,12 +374,10 @@
                     return { quantity: parseFloat(lastNumber[1]), unit: 'count' };
                 }
 
-                // No quantity found - mark as pantry item
                 return { quantity: 0, unit: 'pantry' };
             }
 
             function normalizeUnit(unit, quantity) {
-                // Convert cups to lbs (divide by 2)
                 if (unit === 'cup' || unit === 'cups') {
                     return { unit: 'lbs', quantity: quantity / 2, converted: true };
                 }
@@ -120,11 +401,8 @@
 
             function normalizeIngredientName(name) {
                 let normalized = name.toLowerCase().trim();
-                
-                // Remove dashes
                 normalized = normalized.replace(/-/g, ' ');
                 
-                // Check for items that should keep color adjectives BEFORE removing other words
                 const isPepper = normalized.includes('pepper') && !normalized.includes('crushed') && !normalized.includes('flakes');
                 const isBread = normalized.includes('bread') || normalized.includes('rice');
                 const isChili = normalized.includes('chili') || normalized.includes('chilli');
@@ -143,7 +421,6 @@
                     'flat leaf', 'baby', 'purée', 'puree', 'pantry'
                 ];
                 
-                // Only remove colors if the ingredient is NOT one that needs color preservation
                 if (!isPepper && !isBread && !isChili && !isApple && !isOnion && !isTomato && !isBellPepper && !isPeas && !isPumpkin) {
                     removeWords.push('red', 'green', 'yellow', 'white', 'black', 'purple');
                 }
@@ -153,14 +430,12 @@
                     normalized = normalized.replace(regex, '');
                 });
                 
-                // Normalize slashes and spaces for consolidation
-                normalized = normalized.replace(/\s*\/\s*/g, '/'); // Remove spaces around slashes
+                normalized = normalized.replace(/\s*\/\s*/g, '/');
                 normalized = normalized.replace(/\s+/g, ' ').trim();
-                normalized = normalized.replace(/\s*–\s*/g, ' '); // Normalize en-dashes to spaces
-                normalized = normalized.replace(/\s*-\s*/g, ' '); // Normalize hyphens to spaces (between words)
-                normalized = normalized.replace(/\s+/g, ' ').trim(); // Clean up multiple spaces again
+                normalized = normalized.replace(/\s*–\s*/g, ' ');
+                normalized = normalized.replace(/\s*-\s*/g, ' ');
+                normalized = normalized.replace(/\s+/g, ' ').trim();
                 
-                // Handle "garlic cloves" -> "garlic"
                 normalized = normalized.replace(/\bgarlic\s+clove[s]?\b/gi, 'garlic');
                 
                 const pluralMap = {
@@ -184,12 +459,10 @@
                 line = line.trim();
                 if (!line) return null;
                 
-                // Remove bullet point formatting from the beginning
-                line = line.replace(/^[•\-\*]\s*/, '');  // Remove •, -, * bullets
-                line = line.replace(/^\d+[\.)]\s*/, '');  // Remove numbered lists like "1." or "1)"
+                line = line.replace(/^[•\-\*]\s*/, '');
+                line = line.replace(/^\d+[\.)]\s*/, '');
                 line = line.trim();
                 
-                // Temporarily replace content in parentheses to protect it
                 const parenContents = [];
                 let protectedLine = line.replace(/\([^)]+\)/g, (match) => {
                     parenContents.push(match);
@@ -197,12 +470,9 @@
                 });
 
                 const parsed = parseQuantity(protectedLine);
-                
-                // Remove the quantity and unit from the line to get the ingredient name
                 let ingredientName = protectedLine;
                 
                 if (parsed.quantity > 0) {
-                    // Find and remove only the LAST occurrence of number+unit (including ranges)
                     const unitPattern = /(\d+\.?\d*\s*-\s*)?(\d+\.?\d*)\s*(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?)\b/gi;
                     const matches = [...protectedLine.matchAll(unitPattern)];
                     
@@ -212,7 +482,6 @@
                         const afterMatch = protectedLine.substring(lastMatch.index + lastMatch[0].length);
                         ingredientName = (beforeMatch + afterMatch).trim();
                     } else {
-                        // No unit found, just remove the last standalone number or range
                         const rangeMatches = [...protectedLine.matchAll(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g)];
                         if (rangeMatches.length > 0) {
                             const lastRangeMatch = rangeMatches[rangeMatches.length - 1];
@@ -231,14 +500,12 @@
                     }
                 }
                 
-                // Restore parentheses content
                 ingredientName = ingredientName.replace(/__PAREN_(\d+)__/g, (match, index) => {
                     return parenContents[parseInt(index)];
                 });
 
                 ingredientName = normalizeIngredientName(ingredientName);
                 
-                // Skip if we couldn't extract an ingredient name
                 if (!ingredientName || ingredientName.length === 0) {
                     return null;
                 }
@@ -255,36 +522,16 @@
             }
 
             function consolidateIngredients() {
+                if (!masterData) {
+                    alert('Please load master data first by entering your Google Sheets API key.');
+                    return;
+                }
+
                 const allIngredients = {};
                 const listStats = [];
                 let totalInputItems = 0;
                 let conversionsDetected = false;
-                
-                // Restaurant Depot items list (quantity > 5 lbs required)
-                const rdItemsWithLimit = [
-                    'basmati rice', 'rice', 'tomato', 'onion',
-                    'green pepper', 'pepper', 'cilantro', 'zucchini',
-                    'red pepper', 'english cucumber', 'cucumber', 'carrot',
-                    'potato', 'yogurt'
-                ];
-                
-                // Restaurant Depot herbs (no quantity limit)
-                const rdHerbs = ['mint', 'basil', 'bay leaf'];
-                
-                // Costco items list (any quantity)
-                const costcoItems = [
-                    'pomegranate', 'burger bun', 'bun', 'milk', 'butter', 
-                    'sugar', 'paprika', 'centos tomato', 'canned tomato', 'cheese',
-                    'tortilla', 'uncooked roti', 'bread'
-                ];
-                
-                // Patel Brothers items list (any quantity)
-                const patelItems = [
-                    'roti', 'pav', 'frozen coconut', 'coconut', 
-                    'frozen kathal', 'kathal', 'dates chutney', 'chutney'
-                ];
 
-                // Add line numbers to each list after consolidation
                 const numberedLists = lists.map(list => {
                     if (!list.trim()) return list;
                     const lines = list.split('\n');
@@ -293,8 +540,8 @@
                         if (line.trim()) {
                             return `${lineNumber++}. ${line}`;
                         }
-                        return ''; // Return empty string for blank lines
-                    }).filter(line => line !== '').join('\n'); // Filter out empty lines
+                        return '';
+                    }).filter(line => line !== '').join('\n');
                 });
                 setLists(numberedLists);
 
@@ -319,22 +566,21 @@
                             allIngredients[ingredient.normalized] = {
                                 quantities: {},
                                 isPantry: ingredient.isPantry,
-                                sources: []
+                                sources: [],
+                                originalName: ingredient.normalized
                             };
                         }
 
                         const entry = allIngredients[ingredient.normalized];
                         
-                        // If this is a pantry item, mark it
                         if (ingredient.isPantry) {
                             entry.isPantry = true;
                         } else {
-                            // Only add quantities if it's not a pantry item
                             if (!entry.quantities[ingredient.unit]) {
                                 entry.quantities[ingredient.unit] = 0;
                             }
                             entry.quantities[ingredient.unit] += ingredient.quantity;
-                            entry.isPantry = false; // Override pantry status if we have actual quantities
+                            entry.isPantry = false;
                         }
                         
                         entry.sources.push(listIndex + 1);
@@ -350,107 +596,233 @@
 
                 setHasConversions(conversionsDetected);
 
-                const result = Object.keys(allIngredients)
-                    .sort()
-                    .map(name => {
-                        const item = allIngredients[name];
+                // Step 1: Match with master data (don't consolidate yet)
+                const needsMatching = {};
+                const matchedIngredients = {};
+                
+                for (const [name, item] of Object.entries(allIngredients)) {
+                    // Try exact match first
+                    let masterMatch = masterData.lookup[name];
+                    let matchStatus = 'exact';
+                    
+                    // If no exact match, try fuzzy matching with category context
+                    if (!masterMatch) {
+                        const fuzzyMatches = fuzzyMatchWithCategory(name, masterData);
                         
-                        if (item.isPantry) {
-                            return {
-                                name: name,
-                                count: 'pantry',
-                                isPantry: true,
-                                wasCombined: item.sources.length > 1,
-                                shop: ''
-                            };
-                        }
-
-                        const quantityStrings = Object.entries(item.quantities)
-                            .map(([unit, qty]) => {
-                                return `${qty} ${unit}`;
-                            });
-
-                        // Check if this item qualifies for specific shops
-                        let shop = 'Lotte'; // Default shop
-                        
-                        // Check Patel Brothers (highest priority for specific items)
-                        const isPatelItem = patelItems.some(patelItem => {
-                            const regex = new RegExp('\\b' + patelItem + '\\b', 'i');
-                            return regex.test(name);
-                        });
-                        if (isPatelItem) {
-                            shop = 'Patel';
-                        }
-                        
-                        // Check Costco
-                        if (shop === 'Lotte') {
-                            const isCostcoItem = costcoItems.some(costcoItem => {
-                                // Check if the costco item appears as a complete word or at word boundaries
-                                const regex = new RegExp('\\b' + costcoItem + '\\b', 'i');
-                                return regex.test(name);
-                            });
-                            if (isCostcoItem) {
-                                shop = 'Costco';
+                        // Auto-match only for VERY high similarity (>95%) to avoid false matches
+                        if (fuzzyMatches.length > 0 && fuzzyMatches[0].similarity > 0.95) {
+                            // Auto-match if very high similarity (>95%)
+                            masterMatch = fuzzyMatches[0].data;
+                            matchStatus = 'auto-fuzzy';
+                        } else if (fuzzyMatches.length > 0 && fuzzyMatches[0].similarity >= 0.5) {
+                            // Show matches for user selection
+                            // Don't filter too aggressively - show all reasonable matches
+                            let filteredMatches = fuzzyMatches;
+                            
+                            // Only filter out very different categories if there's a strong category signal
+                            const hasCategoryMatch = fuzzyMatches.some(m => m.categoryMatch);
+                            const topSimilarity = fuzzyMatches[0].similarity;
+                            
+                            // Only filter if we have category matches AND non-category items are significantly worse
+                            if (hasCategoryMatch && topSimilarity > 0.8) {
+                                // Keep category matches + any high similarity items (>70%)
+                                filteredMatches = fuzzyMatches.filter(m => 
+                                    m.categoryMatch || m.similarity > 0.70
+                                );
                             }
-                        }
-                        
-                        // Check RD herbs (no quantity limit)
-                        if (shop === 'Lotte') {
-                            const isRdHerb = rdHerbs.some(herb => {
-                                const regex = new RegExp('\\b' + herb + '\\b', 'i');
-                                return regex.test(name);
-                            });
-                            if (isRdHerb) {
-                                shop = 'RD';
+                            
+                            if (filteredMatches.length > 0) {
+                                // Store for user selection
+                                needsMatching[name] = {
+                                    item: item,
+                                    matches: filteredMatches
+                                };
+                                matchStatus = 'needs-selection';
+                            } else {
+                                matchStatus = 'not-found';
                             }
+                        } else {
+                            matchStatus = 'not-found';
                         }
-                        
-                        // Check RD items with >5 lbs requirement
-                        if (shop === 'Lotte') {
-                            const isRdItem = rdItemsWithLimit.some(rdItem => {
-                                const regex = new RegExp('\\b' + rdItem + '\\b', 'i');
-                                return regex.test(name);
-                            });
-                            if (isRdItem) {
-                                const lbsQty = item.quantities['lbs'] || 0;
-                                if (lbsQty > 5) {
-                                    shop = 'RD';
-                                }
-                            }
-                        }
+                    }
+                    
+                    // Store the matched ingredient with its standardized name
+                    const standardizedName = masterMatch ? masterMatch.item : name;
+                    matchedIngredients[name] = {
+                        standardizedName: standardizedName,
+                        masterData: masterMatch,
+                        quantities: item.quantities,
+                        isPantry: item.isPantry,
+                        sources: item.sources,
+                        matchStatus: matchStatus
+                    };
+                }
 
+                // If there are items needing user selection, show modal
+                if (Object.keys(needsMatching).length > 0) {
+                    setPendingMatches(needsMatching);
+                    setMatchSuggestions(Object.keys(needsMatching));
+                    setShowMatchModal(true);
+                    // Store matched ingredients for later consolidation
+                    window.tempMatchedIngredients = matchedIngredients;
+                    window.tempListStats = { listStats, totalInputItems };
+                } else {
+                    // No matching needed, proceed to consolidation
+                    finalizeConsolidation(matchedIngredients, { listStats, totalInputItems });
+                }
+            }
+
+            function finalizeConsolidation(matchedIngredients, stats) {
+                // Step 2: Consolidate items with the same standardized name
+                const consolidatedByStandardName = {};
+                
+                for (const [originalName, matchInfo] of Object.entries(matchedIngredients)) {
+                    const stdName = matchInfo.standardizedName;
+                    
+                    if (!consolidatedByStandardName[stdName]) {
+                        consolidatedByStandardName[stdName] = {
+                            quantities: { ...matchInfo.quantities }, // Copy quantities from first occurrence
+                            isPantry: matchInfo.isPantry,
+                            sources: [...matchInfo.sources],
+                            masterData: matchInfo.masterData,
+                            matchStatus: matchInfo.matchStatus
+                        };
+                    } else {
+                        // Merge quantities
+                        const existing = consolidatedByStandardName[stdName];
+                        for (const [unit, qty] of Object.entries(matchInfo.quantities)) {
+                            if (!existing.quantities[unit]) {
+                                existing.quantities[unit] = 0;
+                            }
+                            existing.quantities[unit] += qty;
+                        }
+                        // Merge sources
+                        existing.sources = [...new Set([...existing.sources, ...matchInfo.sources])];
+                        // Update pantry status
+                        if (matchInfo.isPantry && !existing.isPantry) {
+                            existing.isPantry = false; // If any instance has quantity, not pantry
+                        }
+                        // Keep best match status
+                        if (matchInfo.matchStatus === 'exact') {
+                            existing.matchStatus = 'exact';
+                        }
+                    }
+                }
+
+                // Step 3: Create final output
+                const result = Object.entries(consolidatedByStandardName).map(([name, item]) => {
+                    if (item.isPantry) {
                         return {
                             name: name,
-                            count: quantityStrings.join(', '),
-                            isPantry: false,
+                            count: 'pantry',
+                            isPantry: true,
                             wasCombined: item.sources.length > 1,
-                            shop: shop
+                            defaultUnit: item.masterData?.defaultUnit || '',
+                            preferredBrand: item.masterData?.preferredBrand || '',
+                            category: item.masterData?.category || '',
+                            preferredStore: item.masterData?.preferredStore || '',
+                            altStore: item.masterData?.altStore || '',
+                            matchStatus: item.matchStatus
                         };
-                    })
-                    .sort((a, b) => {
-                        // Pantry items always at the bottom
-                        if (a.isPantry && !b.isPantry) return 1;
-                        if (!a.isPantry && b.isPantry) return -1;
-                        
-                        // For non-pantry items, sort by shop first, then by name
-                        if (a.shop !== b.shop) {
-                            return a.shop.localeCompare(b.shop);
-                        }
-                        return a.name.localeCompare(b.name);
-                    });
+                    }
+
+                    const quantityStrings = Object.entries(item.quantities)
+                        .map(([unit, qty]) => `${qty} ${unit}`);
+
+                    return {
+                        name: name,
+                        count: quantityStrings.join(', '),
+                        isPantry: false,
+                        wasCombined: item.sources.length > 1,
+                        defaultUnit: item.masterData?.defaultUnit || '',
+                        preferredBrand: item.masterData?.preferredBrand || '',
+                        category: item.masterData?.category || '',
+                        preferredStore: item.masterData?.preferredStore || '',
+                        altStore: item.masterData?.altStore || '',
+                        matchStatus: item.matchStatus
+                    };
+                }).sort((a, b) => {
+                    if (a.isPantry && !b.isPantry) return 1;
+                    if (!a.isPantry && b.isPantry) return -1;
+                    if (a.preferredStore !== b.preferredStore) {
+                        return a.preferredStore.localeCompare(b.preferredStore);
+                    }
+                    return a.name.localeCompare(b.name);
+                });
 
                 setConsolidated(result);
                 setSummary({
-                    listStats: listStats,
-                    totalInputItems: totalInputItems,
+                    listStats: stats.listStats,
+                    totalInputItems: stats.totalInputItems,
                     consolidatedCount: result.length,
-                    itemsSaved: totalInputItems - result.length
+                    itemsSaved: stats.totalInputItems - result.length
                 });
             }
 
+            function handleMatchSelection(ingredientName, selectedMatch) {
+                // Update the temp matched ingredients with user selection
+                if (window.tempMatchedIngredients) {
+                    window.tempMatchedIngredients[ingredientName] = {
+                        ...window.tempMatchedIngredients[ingredientName],
+                        standardizedName: selectedMatch.item,
+                        masterData: selectedMatch,
+                        matchStatus: 'user-selected'
+                    };
+                }
+                
+                // Remove from pending
+                const newPending = { ...pendingMatches };
+                delete newPending[ingredientName];
+                setPendingMatches(newPending);
+                setMatchSuggestions(Object.keys(newPending));
+                
+                // If all matches resolved, finalize consolidation
+                if (Object.keys(newPending).length === 0) {
+                    setShowMatchModal(false);
+                    if (window.tempMatchedIngredients && window.tempListStats) {
+                        finalizeConsolidation(window.tempMatchedIngredients, window.tempListStats);
+                        delete window.tempMatchedIngredients;
+                        delete window.tempListStats;
+                    }
+                }
+            }
+
+            function skipMatch(ingredientName) {
+                // Keep original name and mark as not-found
+                if (window.tempMatchedIngredients) {
+                    window.tempMatchedIngredients[ingredientName] = {
+                        ...window.tempMatchedIngredients[ingredientName],
+                        matchStatus: 'not-found'
+                    };
+                }
+                
+                const newPending = { ...pendingMatches };
+                delete newPending[ingredientName];
+                setPendingMatches(newPending);
+                setMatchSuggestions(Object.keys(newPending));
+                
+                // If all matches resolved, finalize consolidation
+                if (Object.keys(newPending).length === 0) {
+                    setShowMatchModal(false);
+                    if (window.tempMatchedIngredients && window.tempListStats) {
+                        finalizeConsolidation(window.tempMatchedIngredients, window.tempListStats);
+                        delete window.tempMatchedIngredients;
+                        delete window.tempListStats;
+                    }
+                }
+            }
+
             function copyToGoogleSheets() {
-                const headers = ['Items', 'Units', 'Shop'];
-                const rows = consolidated.map(item => [item.name, item.count, item.shop]);
+                const headers = ['Items', 'Units', 'Default Unit', 'Preferred Brand', 'Category', 'Preferred Store', 'Alt Store'];
+                const rows = consolidated.map(item => [
+                    item.name, 
+                    item.count, 
+                    item.defaultUnit, 
+                    item.preferredBrand, 
+                    item.category, 
+                    item.preferredStore, 
+                    item.altStore
+                ]);
                 const tsvContent = [headers, ...rows].map(row => row.join('\t')).join('\n');
 
                 navigator.clipboard.writeText(tsvContent).then(() => {
@@ -477,9 +849,26 @@
                     <div className="max-w-6xl mx-auto">
                         <div className="text-center mb-8">
                             <h1 className="text-4xl font-bold text-gray-800 mb-2">🛒 Ingredient List Consolidator</h1>
-                            <p className="text-gray-600">Combine multiple ingredient lists into one organized shopping list</p>
+                            <p className="text-gray-600">Combine multiple ingredient lists with master data integration</p>
                         </div>
 
+                        {/* Master Data Status */}
+                        {masterData && (
+                            <div className="bg-green-50 rounded-lg p-4 mb-6 border border-green-200">
+                                <p className="text-green-800 font-semibold">
+                                    ✓ Loaded Master Data ({Object.keys(masterData.lookup).length} items)
+                                </p>
+                            </div>
+                        )}
+                        {!masterData && (
+                            <div className="bg-yellow-50 rounded-lg p-4 mb-6 border border-yellow-200">
+                                <p className="text-yellow-800 font-semibold">
+                                    ⚠ Master data not loaded. Please configure API key in the code.
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Input Lists */}
                         <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
                                 {lists.map((list, index) => (
@@ -521,12 +910,71 @@
                                 <button
                                     onClick={consolidateIngredients}
                                     className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition-colors"
+                                    disabled={!masterData}
                                 >
                                     Consolidate Lists
                                 </button>
                             </div>
                         </div>
 
+                        {/* Match Selection Modal */}
+                        {showMatchModal && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                                <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-6">
+                                    <h2 className="text-2xl font-bold text-gray-800 mb-4">Select Matching Items</h2>
+                                    <p className="text-gray-600 mb-6">
+                                        Some ingredients don't have exact matches. Please select the best match or skip.
+                                    </p>
+                                    
+                                    {matchSuggestions.map(ingredientName => (
+                                        <div key={ingredientName} className="mb-6 p-4 border border-gray-200 rounded-lg">
+                                            <h3 className="font-semibold text-lg text-gray-800 mb-3">
+                                                "{ingredientName}"
+                                            </h3>
+                                            <div className="space-y-2">
+                                                {pendingMatches[ingredientName].matches.map((match, idx) => (
+                                                    <button
+                                                        key={idx}
+                                                        onClick={() => handleMatchSelection(ingredientName, match.data)}
+                                                        className={`w-full text-left p-3 border rounded-lg transition-colors ${
+                                                            match.categoryMatch 
+                                                                ? 'border-blue-400 bg-blue-50 hover:bg-blue-100' 
+                                                                : 'border-gray-300 hover:bg-gray-50'
+                                                        }`}
+                                                    >
+                                                        <div className="flex justify-between items-center">
+                                                            <span className="font-medium">{match.data.item}</span>
+                                                            <div className="flex items-center gap-2">
+                                                                {match.categoryMatch && (
+                                                                    <span className="text-xs bg-blue-200 text-blue-800 px-2 py-1 rounded">
+                                                                        Category Match
+                                                                    </span>
+                                                                )}
+                                                                <span className="text-sm text-gray-500">
+                                                                    {Math.round(match.similarity * 100)}% match
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-sm text-gray-600 mt-1">
+                                                            {match.data.category && `Category: ${match.data.category}`}
+                                                            {match.data.preferredStore && ` • Store: ${match.data.preferredStore}`}
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                                <button
+                                                    onClick={() => skipMatch(ingredientName)}
+                                                    className="w-full p-3 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 font-medium"
+                                                >
+                                                    Skip - Keep as "{ingredientName}"
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Summary Statistics */}
                         {summary && (
                             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl shadow-lg p-6 mb-6 border border-blue-200">
                                 <h2 className="text-xl font-bold text-gray-800 mb-4">📊 Summary Statistics</h2>
@@ -570,6 +1018,7 @@
                             </div>
                         )}
 
+                        {/* Results Table */}
                         {consolidated.length > 0 && (
                             <div className="bg-white rounded-xl shadow-lg p-8">
                                 {hasConversions && (
@@ -586,7 +1035,9 @@
                                             <span className="inline-block w-4 h-4 bg-amber-50 border border-amber-300 ml-3 mr-1"></span>
                                             Pantry items
                                             <span className="inline-block w-4 h-4 bg-amber-200 border border-amber-400 ml-3 mr-1"></span>
-                                            Combined pantry items
+                                            Combined pantry
+                                            <span className="inline-block w-4 h-4 bg-red-100 border border-red-300 ml-3 mr-1"></span>
+                                            Not found in master
                                         </p>
                                     </div>
                                     <div className="flex flex-col items-end gap-2">
@@ -607,36 +1058,50 @@
                                     </div>
                                 </div>
                                 
-                                <table className="w-full border-collapse">
-                                    <thead>
-                                        <tr className="bg-gray-100">
-                                            <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Items</th>
-                                            <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Units</th>
-                                            <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Shop</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {consolidated.map((item, index) => {
-                                            let rowClass = "hover:bg-gray-50";
-                                            if (item.isPantry) {
-                                                if (item.wasCombined) {
-                                                    rowClass = "bg-amber-200 border-l-4 border-l-amber-600";
-                                                } else {
-                                                    rowClass = "bg-amber-50 border-l-4 border-l-amber-500";
+                                <div className="overflow-x-auto">
+                                    <table className="w-full border-collapse">
+                                        <thead>
+                                            <tr className="bg-gray-100">
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Items</th>
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Units</th>
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Default Unit</th>
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Preferred Brand</th>
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Category</th>
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Preferred Store</th>
+                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Alt Store</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {consolidated.map((item, index) => {
+                                                let rowClass = "hover:bg-gray-50";
+                                                
+                                                if (item.matchStatus === 'not-found') {
+                                                    rowClass = "bg-red-100 border-l-4 border-l-red-500";
+                                                } else if (item.isPantry) {
+                                                    if (item.wasCombined) {
+                                                        rowClass = "bg-amber-200 border-l-4 border-l-amber-600";
+                                                    } else {
+                                                        rowClass = "bg-amber-50 border-l-4 border-l-amber-500";
+                                                    }
+                                                } else if (item.wasCombined) {
+                                                    rowClass = "bg-green-100 border-l-4 border-l-green-500";
                                                 }
-                                            } else if (item.wasCombined) {
-                                                rowClass = "bg-green-100 border-l-4 border-l-green-500";
-                                            }
-                                            return (
-                                                <tr key={index} className={rowClass}>
-                                                    <td className="border border-gray-300 px-4 py-2">{item.name}</td>
-                                                    <td className="border border-gray-300 px-4 py-2">{item.count}</td>
-                                                    <td className="border border-gray-300 px-4 py-2">{item.shop}</td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
+                                                
+                                                return (
+                                                    <tr key={index} className={rowClass}>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.name}</td>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.count}</td>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.defaultUnit}</td>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.preferredBrand}</td>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.category}</td>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.preferredStore}</td>
+                                                        <td className="border border-gray-300 px-4 py-2">{item.altStore}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         )}
                     </div>
