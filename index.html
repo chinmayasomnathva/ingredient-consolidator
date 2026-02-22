@@ -18,6 +18,7 @@
             const [lists, setLists] = useState(['', '', '']);
             const [consolidated, setConsolidated] = useState([]);
             const [copyStatus, setCopyStatus] = useState('');
+            const [submitStatus, setSubmitStatus] = useState('');
             const [summary, setSummary] = useState(null);
             const [hasConversions, setHasConversions] = useState(false);
             const [apiKey, setApiKey] = useState(localStorage.getItem('googleSheetsApiKey') || '');
@@ -27,10 +28,16 @@
             const [matchSuggestions, setMatchSuggestions] = useState([]);
             const [showMatchModal, setShowMatchModal] = useState(false);
             const [pendingMatches, setPendingMatches] = useState({});
+            const [oauthToken, setOauthToken] = useState(null);
+            const [oauthUser, setOauthUser] = useState('');
+            const [submitDay, setSubmitDay] = useState('friday');
 
             const SHEET_ID = '1yJyhd23X77zH_ITtQu1AtNTI-Ak9KnorymsPJgEJKMc';
             const SHEET_NAME = 'Master List_Annapurna'; // Adjust if needed
             const API_KEY = 'AIzaSyAxFgijOuH0PeE-wmK3DBG2XqmHNnnabyE'; // Set your Google Sheets API key here
+            // OAuth Client ID — create at console.cloud.google.com → APIs & Services → Credentials
+            // Add this page's origin as an Authorised JavaScript Origin
+            const OAUTH_CLIENT_ID = '905820431932-rpieibglpo732pk1ia56bo9mub4b3qtk.apps.googleusercontent.com';
             
 
             // Load master data on mount if API key is set
@@ -152,6 +159,18 @@
                 for (const [key, data] of Object.entries(lookup)) {
                     let similarity = calculateSimilarity(searchTerm, key);
                     
+                    // BLOCKLIST: Prevent compound masala/spice blends from matching simple ingredients
+                    // e.g., "Kanda Lasun Masala (Onion Garlic)" should NOT match "onion" or "garlic"
+                    const compoundMasalaPattern = /\b(masala|blend|spice mix|seasoning)\b/i;
+                    const isCompoundMasala = compoundMasalaPattern.test(key);
+                    const inputIsSimple = searchTerm.split(/\s+/).length <= 2;
+                    if (isCompoundMasala && inputIsSimple) {
+                        // Only allow if the input itself contains "masala" or "spice"
+                        if (!/(masala|spice|seasoning|blend)/i.test(searchTerm)) {
+                            continue; // Skip this match entirely
+                        }
+                    }
+                    
                     // Boost matches that contain the main noun
                     const masterWords = key.split(/\s+/);
                     const masterNoun = masterWords[masterWords.length - 1];
@@ -259,7 +278,8 @@
                             const descriptors = ['frozen', 'fresh', 'canned', 'dried', 'raw', 'cooked', 
                                                'baby', 'red', 'white', 'green', 'yellow', 'black', 
                                                'organic', 'large', 'small', 'whole', 'chopped', 'diced',
-                                               'sliced', 'ground'];
+                                               'sliced', 'ground', 'big', 'packet', 'pack', 'bundle',
+                                               'loose', 'extra'];
                             const hasOnlyDescriptors = otherWords.every(word => descriptors.includes(word.toLowerCase()));
                             
                             if (hasOnlyDescriptors) {
@@ -317,25 +337,25 @@
 
             function parseQuantity(text) {
                 const patterns = [
-                    /(\d+\.?\d*)\s*(lbs?|pounds?)/gi,
-                    /(\d+\.?\d*)\s*(oz|ounces?)/gi,
-                    /(\d+\.?\d*)\s*(gallons?)/gi,
-                    /(\d+\.?\d*)\s*(cups?)/gi,
-                    /(\d+\.?\d*)\s*(packs?|packets?)/gi,
-                    /(\d+\.?\d*)\s*(jars?)/gi,
-                    /(\d+\.?\d*)\s*(bottles?)/gi,
-                    /(\d+\.?\d*)\s*(blocks?)/gi,
-                    /(\d+\.?\d*)\s*(boxes?)/gi,
-                    /(\d+\.?\d*)\s*(bunches?)/gi,
-                    /(\d+\.?\d*)\s*(cartons?)/gi,
-                    /(\d+\.?\d*)\s*(stalks?)/gi,
-                    /(\d+\.?\d*)\s*(cloves?)/gi,
-                    /(\d+\.?\d*)\s*(count)/gi,
-                    /(\d+\.?\d*)\s*(cans?)/gi,
-                    /(\d+\.?\d*)\s*(tins?)/gi,
-                    /(\d+\.?\d*)\s*(bags?)/gi,
-                    /(\d+\.?\d*)\s*(sticks?)/gi,
-                    /(\d+\.?\d*)\s*(gms?|grams?)/gi,
+                    /(\d*\.?\d+)\s*(lbs?|pounds?)/gi,
+                    /(\d*\.?\d+)\s*(oz|ounces?)/gi,
+                    /(\d*\.?\d+)\s*(gallons?)/gi,
+                    /(\d*\.?\d+)\s*(cups?)/gi,
+                    /(\d*\.?\d+)\s*(packs?|packets?)/gi,
+                    /(\d*\.?\d+)\s*(jars?)/gi,
+                    /(\d*\.?\d+)\s*(bottles?)/gi,
+                    /(\d*\.?\d+)\s*(blocks?)/gi,
+                    /(\d*\.?\d+)\s*(boxes?)/gi,
+                    /(\d*\.?\d+)\s*(bunches?)/gi,
+                    /(\d*\.?\d+)\s*(cartons?)/gi,
+                    /(\d*\.?\d+)\s*(stalks?)/gi,
+                    /(\d*\.?\d+)\s*(cloves?)/gi,
+                    /(\d*\.?\d+)\s*(count)/gi,
+                    /(\d*\.?\d+)\s*(cans?)/gi,
+                    /(\d*\.?\d+)\s*(tins?)/gi,
+                    /(\d*\.?\d+)\s*(bags?)/gi,
+                    /(\d*\.?\d+)\s*(sticks?)/gi,
+                    /(\d*\.?\d+)\s*(gms?|grams?)/gi,
                 ];
 
                 let lastMatch = null;
@@ -361,14 +381,14 @@
                     return { quantity: quantity, unit: lastMatch[2].toLowerCase() };
                 }
 
-                const rangeMatch = text.match(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g);
+                const rangeMatch = text.match(/(\d*\.?\d+)\s*-\s*(\d*\.?\d+)/g);
                 if (rangeMatch) {
                     const lastRange = rangeMatch[rangeMatch.length - 1];
-                    const rangeParts = lastRange.match(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/);
+                    const rangeParts = lastRange.match(/(\d*\.?\d+)\s*-\s*(\d*\.?\d+)/);
                     return { quantity: parseFloat(rangeParts[2]), unit: 'count' };
                 }
                 
-                const allNumbers = [...text.matchAll(/(\d+\.?\d*)/g)];
+                const allNumbers = [...text.matchAll(/(\d*\.?\d+)/g)];
                 if (allNumbers.length > 0) {
                     const lastNumber = allNumbers[allNumbers.length - 1];
                     return { quantity: parseFloat(lastNumber[1]), unit: 'count' };
@@ -418,7 +438,8 @@
                     'organic', 'extra virgin', 'virgin', 'unsalted', 'salted',
                     'fresh', 'frozen', 'canned',
                     'shredded', 'diced', 'chopped', 'sliced', 'whole', 'peeled',
-                    'flat leaf', 'baby', 'purée', 'puree', 'pantry'
+                    'flat leaf', 'baby', 'purée', 'puree', 'pantry',
+                    'big', 'large', 'small', 'packet', 'pack', 'bundle'
                 ];
                 
                 if (!isPepper && !isBread && !isChili && !isApple && !isOnion && !isTomato && !isBellPepper && !isPeas && !isPumpkin) {
@@ -473,7 +494,7 @@
                 let ingredientName = protectedLine;
                 
                 if (parsed.quantity > 0) {
-                    const unitPattern = /(\d+\.?\d*\s*-\s*)?(\d+\.?\d*)\s*(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?)\b/gi;
+                    const unitPattern = /(\d*\.?\d+\s*-\s*)?(\d*\.?\d+)\s*(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?)\b/gi;
                     const matches = [...protectedLine.matchAll(unitPattern)];
                     
                     if (matches.length > 0) {
@@ -482,14 +503,14 @@
                         const afterMatch = protectedLine.substring(lastMatch.index + lastMatch[0].length);
                         ingredientName = (beforeMatch + afterMatch).trim();
                     } else {
-                        const rangeMatches = [...protectedLine.matchAll(/(\d+\.?\d*)\s*-\s*(\d+\.?\d*)/g)];
+                        const rangeMatches = [...protectedLine.matchAll(/(\d*\.?\d+)\s*-\s*(\d*\.?\d+)/g)];
                         if (rangeMatches.length > 0) {
                             const lastRangeMatch = rangeMatches[rangeMatches.length - 1];
                             const beforeRange = protectedLine.substring(0, lastRangeMatch.index);
                             const afterRange = protectedLine.substring(lastRangeMatch.index + lastRangeMatch[0].length);
                             ingredientName = (beforeRange + afterRange).trim();
                         } else {
-                            const numberMatches = [...protectedLine.matchAll(/(\d+\.?\d*)/g)];
+                            const numberMatches = [...protectedLine.matchAll(/(\d*\.?\d+)/g)];
                             if (numberMatches.length > 0) {
                                 const lastNumMatch = numberMatches[numberMatches.length - 1];
                                 const beforeNum = protectedLine.substring(0, lastNumMatch.index);
@@ -834,6 +855,148 @@
                 });
             }
 
+            function getUpcomingDay(targetDay) {
+                // targetDay: 0=Sunday, 5=Friday
+                const today = new Date();
+                const day = today.getDay();
+                const daysUntil = (targetDay - day + 7) % 7 || 7;
+                const result = new Date(today);
+                result.setDate(today.getDate() + daysUntil);
+                return result;
+            }
+
+            function formatTabName(date) {
+                const mm = String(date.getMonth() + 1).padStart(2, '0');
+                const dd = String(date.getDate()).padStart(2, '0');
+                const yyyy = date.getFullYear();
+                return `${mm}/${dd}/${yyyy}`;
+            }
+
+            // Listen for OAuth2 token returned via postMessage from popup
+            useEffect(() => {
+                function handleMessage(event) {
+                    if (event.origin !== window.location.origin) return;
+                    if (event.data && event.data.type === 'oauth2_token') {
+                        setOauthToken(event.data.access_token);
+                        setOauthUser(event.data.email || 'Signed in');
+                    } else if (event.data && event.data.type === 'oauth2_error') {
+                        setSubmitStatus('✗ Sign-in error: ' + event.data.error);
+                        setTimeout(() => setSubmitStatus(''), 5000);
+                    }
+                }
+                window.addEventListener('message', handleMessage);
+                return () => window.removeEventListener('message', handleMessage);
+            }, []);
+
+            function signInWithGoogle() {
+                const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+                const redirectUri = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/oauth2callback.html');
+                const params = new URLSearchParams({
+                    client_id: OAUTH_CLIENT_ID,
+                    redirect_uri: redirectUri,
+                    response_type: 'token',
+                    scope: SCOPE,
+                    include_granted_scopes: 'true',
+                    prompt: 'select_account'
+                });
+                const width = 500, height = 600;
+                const left = window.screenX + (window.outerWidth - width) / 2;
+                const top = window.screenY + (window.outerHeight - height) / 2;
+                window.open(
+                    'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString(),
+                    'googleAuth',
+                    `width=${width},height=${height},left=${left},top=${top}`
+                );
+            }
+
+            function signOutGoogle() {
+                if (oauthToken) {
+                    fetch(`https://oauth2.googleapis.com/revoke?token=${oauthToken}`, { method: 'POST' }).catch(() => {});
+                }
+                setOauthToken(null);
+                setOauthUser('');
+            }
+
+            async function submitToGoogleSheets() {
+                if (!consolidated.length) return;
+
+                if (!oauthToken) {
+                    setSubmitStatus('✗ Please sign in with Google first');
+                    setTimeout(() => setSubmitStatus(''), 4000);
+                    return;
+                }
+
+                const freshToken = oauthToken;
+
+                const SUBMIT_SHEET_ID = '1UbBBupMUuF8m4Ax8B8Vfid2ojqa0nt4bbOxG4JpmyI4';
+                const targetDayNum = submitDay === 'friday' ? 5 : 0;
+                const targetDate = getUpcomingDay(targetDayNum);
+                const tabName = formatTabName(targetDate);
+
+                setSubmitStatus('⏳ Submitting...');
+
+                try {
+                    // Step 1: Create new tab with Friday date name
+                    const addSheetRes = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}:batchUpdate`,
+                        {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${freshToken}`
+                            },
+                            body: JSON.stringify({
+                                requests: [{ addSheet: { properties: { title: tabName } } }]
+                            })
+                        }
+                    );
+
+                    if (!addSheetRes.ok) {
+                        const err = await addSheetRes.json();
+                        // Tab already exists is fine — proceed to write
+                        if (!err.error?.message?.toLowerCase().includes('already exists')) {
+                            throw new Error(err.error?.message || 'Failed to create sheet tab');
+                        }
+                    }
+
+                    // Step 2: Write data into the tab
+                    const headers = ['Items', 'Units', 'Default Unit', 'Preferred Brand', 'Category', 'Preferred Store', 'Alt Store'];
+                    const rows = consolidated.map(item => [
+                        item.name,
+                        item.count,
+                        item.defaultUnit,
+                        item.preferredBrand,
+                        item.category,
+                        item.preferredStore,
+                        item.altStore
+                    ]);
+                    const values = [headers, ...rows];
+
+                    const writeRes = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}/values/${encodeURIComponent(tabName + '!A1')}?valueInputOption=RAW`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${freshToken}`
+                            },
+                            body: JSON.stringify({ values })
+                        }
+                    );
+
+                    if (!writeRes.ok) {
+                        const err = await writeRes.json();
+                        throw new Error(err.error?.message || 'Failed to write data');
+                    }
+
+                    setSubmitStatus(`✓ Submitted to tab "${tabName}"`);
+                    setTimeout(() => setSubmitStatus(''), 6000);
+                } catch (error) {
+                    setSubmitStatus(`✗ Error: ${error.message}`);
+                    setTimeout(() => setSubmitStatus(''), 6000);
+                }
+            }
+
             function addNewList() {
                 setLists([...lists, '']);
             }
@@ -856,7 +1019,7 @@
                         {masterData && (
                             <div className="bg-green-50 rounded-lg p-4 mb-6 border border-green-200">
                                 <p className="text-green-800 font-semibold">
-                                    ✓ Loaded Master Data ({Object.keys(masterData.lookup).length} items)
+                                    ✓ Loaded Master List Annapurna ({Object.keys(masterData.lookup).length} items)
                                 </p>
                             </div>
                         )}
@@ -867,6 +1030,37 @@
                                 </p>
                             </div>
                         )}
+
+                        {/* Google Sign-In for Submit */}
+                        <div className="bg-white rounded-xl shadow-sm p-4 mb-6 border border-gray-200 flex items-center justify-between">
+                            <div>
+                                <p className="text-sm font-semibold text-gray-700">Google Account — required for Submit</p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                    {oauthToken ? `Signed in as ${oauthUser}` : 'Sign in to enable writing to the shopping sheet'}
+                                </p>
+                            </div>
+                            {!oauthToken ? (
+                                <button
+                                    onClick={signInWithGoogle}
+                                    className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 rounded-lg shadow-sm hover:bg-gray-50 text-sm font-medium text-gray-700 transition-colors"
+                                >
+                                    <svg className="w-5 h-5" viewBox="0 0 24 24">
+                                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
+                                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                                    </svg>
+                                    Sign in with Google
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={signOutGoogle}
+                                    className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-medium transition-colors"
+                                >
+                                    Sign Out
+                                </button>
+                            )}
+                        </div>
 
                         {/* Input Lists */}
                         <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
@@ -1041,18 +1235,44 @@
                                         </p>
                                     </div>
                                     <div className="flex flex-col items-end gap-2">
-                                        <button
-                                            onClick={copyToGoogleSheets}
-                                            className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors flex items-center gap-2"
-                                        >
-                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                            </svg>
-                                            Copy to Google Sheets
-                                        </button>
+                                        <div className="flex gap-3 items-center flex-wrap justify-end">
+                                            <button
+                                                onClick={copyToGoogleSheets}
+                                                className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors flex items-center gap-2"
+                                            >
+                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                                </svg>
+                                                Copy to Google Sheets
+                                            </button>
+                                            <div className="flex items-center gap-2">
+                                                <select
+                                                    value={submitDay}
+                                                    onChange={(e) => setSubmitDay(e.target.value)}
+                                                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                                >
+                                                    <option value="friday">Friday</option>
+                                                    <option value="sunday">Sunday</option>
+                                                </select>
+                                                <button
+                                                    onClick={submitToGoogleSheets}
+                                                    className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition-colors flex items-center gap-2"
+                                                >
+                                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                                                    </svg>
+                                                    Submit — {submitDay === 'friday' ? 'Friday' : 'Sunday'} {formatTabName(getUpcomingDay(submitDay === 'friday' ? 5 : 0))}
+                                                </button>
+                                            </div>
+                                        </div>
                                         {copyStatus && (
                                             <span className={`text-sm font-medium ${copyStatus.includes('✓') ? 'text-green-600' : 'text-red-600'}`}>
                                                 {copyStatus}
+                                            </span>
+                                        )}
+                                        {submitStatus && (
+                                            <span className={`text-sm font-medium ${submitStatus.includes('✓') ? 'text-blue-600' : submitStatus.includes('⏳') ? 'text-gray-500' : 'text-red-600'}`}>
+                                                {submitStatus}
                                             </span>
                                         )}
                                     </div>
