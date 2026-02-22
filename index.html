@@ -889,7 +889,7 @@
             }, []);
 
             function signInWithGoogle() {
-                const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+                const SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
                 const redirectUri = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/oauth2callback.html');
                 const params = new URLSearchParams({
                     client_id: OAUTH_CLIENT_ID,
@@ -988,6 +988,86 @@
                         const err = await writeRes.json();
                         throw new Error(err.error?.message || 'Failed to write data');
                     }
+
+                    // Step 3: Get the new sheet's ID for formatting
+                    const metaRes = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}?fields=sheets.properties`,
+                        { headers: { 'Authorization': `Bearer ${freshToken}` } }
+                    );
+                    const meta = await metaRes.json();
+                    const sheetObj = meta.sheets.find(s => s.properties.title === tabName);
+                    const sheetId = sheetObj ? sheetObj.properties.sheetId : 0;
+
+                    // Step 4: Apply formatting via batchUpdate
+                    // Row colors: green=consolidated, amber50=pantry, amber200=combined pantry, red=not-found, white=normal
+                    const colorMap = {
+                        'not-found':      { r: 1,    g: 0.8,  b: 0.8  },  // red-100
+                        'pantry-single':  { r: 1,    g: 0.98, b: 0.94 },  // amber-50
+                        'pantry-combined':{ r: 1,    g: 0.91, b: 0.71 },  // amber-200
+                        'consolidated':   { r: 0.88, g: 0.96, b: 0.88 },  // green-100
+                        'normal':         { r: 1,    g: 1,    b: 1    }
+                    };
+
+                    function getRowColor(item) {
+                        if (item.matchStatus === 'not-found') return colorMap['not-found'];
+                        if (item.isPantry && item.wasCombined) return colorMap['pantry-combined'];
+                        if (item.isPantry) return colorMap['pantry-single'];
+                        if (item.wasCombined) return colorMap['consolidated'];
+                        return colorMap['normal'];
+                    }
+
+                    const formatRequests = [];
+
+                    // Bold + dark background for header row
+                    formatRequests.push({
+                        repeatCell: {
+                            range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 7 },
+                            cell: {
+                                userEnteredFormat: {
+                                    textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                                    backgroundColor: { red: 0.26, green: 0.26, blue: 0.26 },
+                                    verticalAlignment: 'MIDDLE'
+                                }
+                            },
+                            fields: 'userEnteredFormat(textFormat,backgroundColor,verticalAlignment)'
+                        }
+                    });
+
+                    // Row colors for data rows
+                    consolidated.forEach((item, i) => {
+                        const color = getRowColor(item);
+                        formatRequests.push({
+                            repeatCell: {
+                                range: { sheetId, startRowIndex: i + 1, endRowIndex: i + 2, startColumnIndex: 0, endColumnIndex: 7 },
+                                cell: { userEnteredFormat: { backgroundColor: color } },
+                                fields: 'userEnteredFormat.backgroundColor'
+                            }
+                        });
+                    });
+
+                    // Freeze header row
+                    formatRequests.push({
+                        updateSheetProperties: {
+                            properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+                            fields: 'gridProperties.frozenRowCount'
+                        }
+                    });
+
+                    // Auto-resize all columns
+                    formatRequests.push({
+                        autoResizeDimensions: {
+                            dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 7 }
+                        }
+                    });
+
+                    await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}:batchUpdate`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${freshToken}` },
+                            body: JSON.stringify({ requests: formatRequests })
+                        }
+                    );
 
                     setSubmitStatus(`✓ Submitted to tab "${tabName}"`);
                     setTimeout(() => setSubmitStatus(''), 6000);
@@ -1231,7 +1311,7 @@
                                             <span className="inline-block w-4 h-4 bg-amber-200 border border-amber-400 ml-3 mr-1"></span>
                                             Combined pantry
                                             <span className="inline-block w-4 h-4 bg-red-100 border border-red-300 ml-3 mr-1"></span>
-                                            Not found in master
+                                            Not found
                                         </p>
                                     </div>
                                     <div className="flex flex-col items-end gap-2">
