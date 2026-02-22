@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head><title>Signing in...</title></head>
+<body>
+<p style="font-family:sans-serif;text-align:center;margin-top:80px;color:#555">
+  Signing in, please wait...
+</p>
+<script>
+  (function() {
+    // Parse access_token and other params from the URL hash
+    var hash = window.location.hash.substring(1);
+    var params = {};
+    hash.split('&').forEach(function(part) {
+      var kv = part.split('=');
+      params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || '');
+    });
+
+    if (params.access_token) {
+      // Fetch user email using the token
+      fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { 'Authorization': 'Bearer ' + params.access_token }
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(info) {
+        window.opener.postMessage({
+          type: 'oauth2_token',
+          access_token: params.access_token,
+          email: info.email || 'Signed in'
+        }, window.location.origin);
+        window.close();
+      })
+      .catch(function() {
+        window.opener.postMessage({
+          type: 'oauth2_token',
+          access_token: params.access_token,
+          email: 'Signed in'
+        }, window.location.origin);
+        window.close();
+      });
+    } else if (params.error) {
+      window.opener.postMessage({
+        type: 'oauth2_error',
+        error: params.error
+      }, window.location.origin);
+      window.close();
+    } else {
+      document.body.innerHTML = '<p style="font-family:sans-serif;text-align:center;margin-top:80px;color:red">Sign-in failed. Please close this window and try again.</p>';
+    }
+  })();
+</script>
+</body>
+</html>
