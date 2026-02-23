@@ -123,21 +123,47 @@
                 
                 // Synonym mapping for common ingredient variations
                 const synonyms = {
+                    'jira': 'cumin',
+                    'jeera': 'cumin',
+                    'zeera': 'cumin',
                     'coriander': 'cilantro',
                     'coriander leaf': 'cilantro',
                     'curry leaf': 'curry leaves',
-                    'tomato': 'tomatoes'
+                    'tomato': 'tomatoes',
+                    'chickpea': 'garbanzo beans',
+                    'chickpeas': 'garbanzo beans',
+                    'garbanzo': 'garbanzo beans',
+                    'garbanzos': 'garbanzo beans',
+                    'english cucumber': 'cucumbers english long',
+                    'cucumber': 'cucumbers',
+                    'penne pasta': 'pasta penne rigatoni elbow',
+                    'penne': 'pasta penne',
+                    'rigatoni': 'pasta penne',
+                    'elbow pasta': 'pasta penne rigatoni elbow',
+                    'mixed bell pepper': 'bell peppers mixed',
+                    'bell pepper': 'bell peppers',
+                    'butter sticks': 'unsalted butter sticks',
+                    'butter': 'unsalted butter sticks',
+                    'peanut butter': 'peanut butter',
+                    'almond butter': 'almond butter',
+                    'nut butter': 'nut butter'
                 };
                 
-                // Check if input has a known synonym
+                // Check if input has a known synonym — prefer longest matching key
                 let searchTerm = inputLower;
+                let bestSynonymKey = '';
                 for (const [key, value] of Object.entries(synonyms)) {
-                    if (inputLower.includes(key)) {
+                    if (inputLower.includes(key) && key.length > bestSynonymKey.length) {
+                        bestSynonymKey = key;
                         searchTerm = inputLower.replace(key, value);
-                        break;
                     }
                 }
                 
+                // Strip parenthetical content from searchTerm
+                // e.g. "jira (cumin)" after synonym substitution → "cumin (cumin)" → "cumin"
+                searchTerm = searchTerm.replace(/\([^)]+\)/g, '').replace(/\s+/g, ' ').trim();
+
+                console.log('[MATCH] input:', inputLower, '=> searchTerm:', searchTerm);
                 // Extract main noun (last word) and adjectives (other words)
                 const inputWords = searchTerm.split(/\s+/);
                 const inputNoun = inputWords[inputWords.length - 1]; // e.g., "chana" from "black chana"
@@ -148,7 +174,10 @@
                 let maxInitialSimilarity = 0;
                 
                 for (const [key, data] of Object.entries(lookup)) {
-                    const similarity = calculateSimilarity(searchTerm, key);
+                    const keyForMatch = key
+                        .replace(/\(([^)]+)\)/g, (_, inner) => ' ' + inner.replace(/[-–]/g, ' '))
+                        .replace(/\s+/g, ' ').trim();
+                    const similarity = calculateSimilarity(searchTerm, keyForMatch);
                     if (similarity > maxInitialSimilarity) {
                         maxInitialSimilarity = similarity;
                         likelyCategory = data.category.toLowerCase();
@@ -157,7 +186,13 @@
                 
                 // Second pass: Score matches with category boost and noun-based matching
                 for (const [key, data] of Object.entries(lookup)) {
-                    let similarity = calculateSimilarity(searchTerm, key);
+                    // Strip parenthetical content from master key for matching
+                    // e.g. "cucumbers (english - long)" → "cucumbers english long"
+                    // e.g. "bell peppers (mixed)" → "bell peppers mixed"
+                    const keyForMatch = key
+                        .replace(/\(([^)]+)\)/g, (_, inner) => ' ' + inner.replace(/[-–]/g, ' '))
+                        .replace(/\s+/g, ' ').trim();
+                    let similarity = calculateSimilarity(searchTerm, keyForMatch);
                     
                     // BLOCKLIST: Prevent compound masala/spice blends from matching simple ingredients
                     // e.g., "Kanda Lasun Masala (Onion Garlic)" should NOT match "onion" or "garlic"
@@ -176,7 +211,7 @@
                     const masterNoun = masterWords[masterWords.length - 1];
                     
                     // If master item contains the input noun, boost similarity
-                    if (key.includes(inputNoun)) {
+                    if (keyForMatch.includes(inputNoun)) {
                         similarity = Math.min(1.0, similarity * 1.2); // 20% boost for noun match
                     }
                     
@@ -191,7 +226,7 @@
                             data, 
                             similarity,
                             categoryMatch: data.category.toLowerCase() === likelyCategory,
-                            nounMatch: key.includes(inputNoun)
+                            nounMatch: keyForMatch.includes(inputNoun)
                         });
                     }
                 }
@@ -224,10 +259,14 @@
                 
                 // Handle common singular/plural variations
                 const singularToPlural = {
-                    'tomato': 'tomatoes', 'potato': 'potatoes', 'leaf': 'leaves', 'leaves': 'leaves'
+                    'tomato': 'tomatoes', 'potato': 'potatoes', 'leaf': 'leaves', 'leaves': 'leaves',
+                    'pepper': 'peppers', 'cucumber': 'cucumbers', 'bean': 'beans',
+                    'onion': 'onions', 'carrot': 'carrots', 'lemon': 'lemons'
                 };
                 const pluralToSingular = {
-                    'tomatoes': 'tomato', 'potatoes': 'potato', 'leaves': 'leaf'
+                    'tomatoes': 'tomato', 'potatoes': 'potato', 'leaves': 'leaf',
+                    'peppers': 'pepper', 'cucumbers': 'cucumber', 'beans': 'bean',
+                    'onions': 'onion', 'carrots': 'carrot', 'lemons': 'lemon'
                 };
                 
                 // Check if one is singular and other is plural of same word
@@ -279,7 +318,8 @@
                                                'baby', 'red', 'white', 'green', 'yellow', 'black', 
                                                'organic', 'large', 'small', 'whole', 'chopped', 'diced',
                                                'sliced', 'ground', 'big', 'packet', 'pack', 'bundle',
-                                               'loose', 'extra'];
+                                               'loose', 'extra', 'mixed', 'english', 'long', 'mini',
+                                               'seedless', 'boneless', 'skinless', 'shelled', 'pitted'];
                             const hasOnlyDescriptors = otherWords.every(word => descriptors.includes(word.toLowerCase()));
                             
                             if (hasOnlyDescriptors) {
@@ -302,7 +342,44 @@
                     return 0.8;
                 }
                 
-                // Calculate edit distance
+                // Word-overlap based scoring (order-independent)
+                // Handles cases like "english cucumbers" vs "cucumbers english long"
+                const allInputWords = shorter.split(/\s+/).filter(w => w.length > 1);
+                const allMasterWords = longer.split(/\s+/).filter(w => w.length > 1);
+                const descriptorSet = new Set(['frozen','fresh','canned','dried','raw','cooked',
+                    'baby','red','white','green','yellow','black','organic','large','small','whole',
+                    'chopped','diced','sliced','ground','big','packet','pack','bundle','loose','extra',
+                    'mixed','english','long','mini','seedless','boneless','skinless','shelled','pitted']);
+
+                // Count how many input words appear in master words (with s/plural tolerance)
+                let matchedInputWords = 0;
+                allInputWords.forEach(iw => {
+                    if (allMasterWords.some(mw =>
+                        mw === iw || mw.includes(iw) || iw.includes(mw) ||
+                        singularToPlural[iw] === mw || pluralToSingular[iw] === mw ||
+                        singularToPlural[mw] === iw || pluralToSingular[mw] === iw
+                    )) matchedInputWords++;
+                });
+
+                const inputCoverage = matchedInputWords / allInputWords.length;
+
+                // All input words matched in master → good match, check if extra master words are descriptors
+                if (inputCoverage === 1.0) {
+                    const extraMasterWords = allMasterWords.filter(mw =>
+                        !allInputWords.some(iw =>
+                            mw === iw || mw.includes(iw) || iw.includes(mw) ||
+                            singularToPlural[iw] === mw || pluralToSingular[iw] === mw
+                        )
+                    );
+                    const allExtrasAreDescriptors = extraMasterWords.every(w => descriptorSet.has(w));
+                    if (allExtrasAreDescriptors) return 0.85;
+                    return 0.70;
+                }
+
+                // Most input words matched → decent match
+                if (inputCoverage >= 0.66) return 0.60;
+
+                // Calculate edit distance as fallback
                 const editDistance = levenshteinDistance(str1, str2);
                 return (longer.length - editDistance) / longer.length;
             }
@@ -432,6 +509,8 @@
                 const isBellPepper = normalized.includes('bell');
                 const isPeas = normalized.includes('peas') || normalized.includes('vatana');
                 const isPumpkin = normalized.includes('pumpkin') || normalized.includes('guard');
+                const isCucumber = normalized.includes('cucumber');
+                const isBean = normalized.includes('bean') || normalized.includes('chickpea') || normalized.includes('garbanzo');
                 
                 const removeWords = [
                     'twin pack', 'costco', 'restaurant depot', 'trader joe',
@@ -439,11 +518,25 @@
                     'fresh', 'frozen', 'canned',
                     'shredded', 'diced', 'chopped', 'sliced', 'whole', 'peeled',
                     'flat leaf', 'baby', 'purée', 'puree', 'pantry',
-                    'big', 'large', 'small', 'packet', 'pack', 'bundle'
+                    'big', 'large', 'small', 'packet', 'pack', 'bundle',
+                    'mixed', 'english', 'long', 'mini', 'seedless', 'boneless', 'skinless'
                 ];
                 
                 if (!isPepper && !isBread && !isChili && !isApple && !isOnion && !isTomato && !isBellPepper && !isPeas && !isPumpkin) {
                     removeWords.push('red', 'green', 'yellow', 'white', 'black', 'purple');
+                }
+                // Protect "mixed" for bell peppers, "english" for cucumbers
+                if (isBellPepper) {
+                    const idx = removeWords.indexOf('mixed');
+                    if (idx > -1) removeWords.splice(idx, 1);
+                }
+                if (isCucumber) {
+                    const idx = removeWords.indexOf('english');
+                    if (idx > -1) removeWords.splice(idx, 1);
+                }
+                // For bean/chickpea inputs, remove "peas" (noise from "chickpeas peas")
+                if (isBean) {
+                    removeWords.push('peas');
                 }
                 
                 removeWords.forEach(word => {
@@ -527,7 +620,9 @@
 
                 ingredientName = normalizeIngredientName(ingredientName);
                 
-                if (!ingredientName || ingredientName.length === 0) {
+                // Filter out lines that are just noise/section headers after normalization
+                const noiseOnlyWords = new Set(['from', 'for', 'the', 'and', 'or', 'with', 'a', 'an', 'of', 'to', 'in', 'on']);
+                if (!ingredientName || ingredientName.length === 0 || noiseOnlyWords.has(ingredientName.trim())) {
                     return null;
                 }
 
@@ -927,7 +1022,6 @@
                 }
 
                 const freshToken = oauthToken;
-
                 const SUBMIT_SHEET_ID = '1UbBBupMUuF8m4Ax8B8Vfid2ojqa0nt4bbOxG4JpmyI4';
                 const targetDayNum = submitDay === 'friday' ? 5 : 0;
                 const targetDate = getUpcomingDay(targetDayNum);
@@ -936,51 +1030,163 @@
                 setSubmitStatus('⏳ Submitting...');
 
                 try {
-                    // Step 1: Create new tab with Friday date name
-                    const addSheetRes = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}:batchUpdate`,
-                        {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${freshToken}`
-                            },
-                            body: JSON.stringify({
-                                requests: [{ addSheet: { properties: { title: tabName } } }]
-                            })
-                        }
+                    // Step 1: Always read existing tab data first (reliable tab-exists detection)
+                    setSubmitStatus('⏳ Checking for existing data...');
+                    const existingRes = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}/values/${encodeURIComponent(tabName) + '!A:G'}`,
+                        { headers: { 'Authorization': `Bearer ${freshToken}` } }
                     );
 
-                    if (!addSheetRes.ok) {
-                        const err = await addSheetRes.json();
-                        // Tab already exists is fine — proceed to write
-                        if (!err.error?.message?.toLowerCase().includes('already exists')) {
-                            throw new Error(err.error?.message || 'Failed to create sheet tab');
+                    // Step 2: Merge if existing data found, otherwise use consolidated as-is
+                    let finalItems = [...consolidated];
+                    const existingData = existingRes.ok ? await existingRes.json() : null;
+                    const rawValues = existingData ? (existingData.values || []) : [];
+
+                    // Detect if header row is present; skip it
+                    const hasHeader = rawValues.length > 0 && (rawValues[0][0] || '').toLowerCase() === 'items';
+                    const existingRows = hasHeader ? rawValues.slice(1) : rawValues;
+                    const tabAlreadyExists = existingRows.length > 0;
+
+                    console.log('[SUBMIT] existingRes.ok:', existingRes.ok,
+                        '| rawValues rows:', rawValues.length,
+                        '| hasHeader:', hasHeader,
+                        '| existingRows:', existingRows.length,
+                        '| tabAlreadyExists:', tabAlreadyExists);
+
+                    if (tabAlreadyExists) {
+                        setSubmitStatus('\u23f3 Tab exists \u2014 merging...');
+
+                        // Build lookup from existing sheet rows
+                        const existingByName = {};
+                        existingRows.forEach(row => {
+                            const name = (row[0] || '').trim();
+                            if (!name) return;
+                            const unitsStr = (row[1] || '').trim();
+                            const quantities = {};
+                            unitsStr.split(',').forEach(part => {
+                                part = part.trim();
+                                if (part === 'pantry') { quantities['pantry'] = 0; return; }
+                                const m = part.match(/^([\d.]+)\s+(.+)$/);
+                                if (m) quantities[m[2].trim()] = parseFloat(m[1]);
+                                else console.warn('[MERGE] could not parse units part:', JSON.stringify(part));
+                            });
+                            existingByName[name.toLowerCase()] = {
+                                name, quantities,
+                                isPantry: unitsStr === 'pantry',
+                                defaultUnit: row[2] || '', preferredBrand: row[3] || '',
+                                category: row[4] || '', preferredStore: row[5] || '',
+                                altStore: row[6] || '', matchStatus: 'exact', wasCombined: false
+                            };
+                        });
+
+                        console.log('[MERGE] existing keys:', Object.keys(existingByName));
+                        console.log('[MERGE] new item keys:', consolidated.map(i => i.name.toLowerCase() + '=' + i.count));
+
+                        const mergedByName = { ...existingByName };
+
+                        consolidated.forEach(item => {
+                            const key = item.name.toLowerCase();
+                            if (mergedByName[key]) {
+                                const existing = mergedByName[key];
+                                if (!item.isPantry && item.count !== 'pantry') {
+                                    const newQtys = {};
+                                    item.count.split(',').forEach(part => {
+                                        part = part.trim();
+                                        const m = part.match(/^([\d.]+)\s+(.+)$/);
+                                        if (m) newQtys[m[2].trim()] = parseFloat(m[1]);
+                                        else console.warn('[MERGE] could not parse new count part:', JSON.stringify(part));
+                                    });
+                                    console.log('[MERGE] summing', key, '| existing:', {...existing.quantities}, '+ new:', newQtys);
+                                    Object.entries(newQtys).forEach(([unit, qty]) => {
+                                        existing.quantities[unit] = (existing.quantities[unit] || 0) + qty;
+                                    });
+                                    console.log('[MERGE] result:', existing.quantities);
+                                    existing.isPantry = false;
+                                }
+                                existing.wasCombined = true;
+                                if (item.defaultUnit) existing.defaultUnit = item.defaultUnit;
+                                if (item.preferredBrand) existing.preferredBrand = item.preferredBrand;
+                                if (item.category) existing.category = item.category;
+                                if (item.preferredStore) existing.preferredStore = item.preferredStore;
+                                if (item.altStore) existing.altStore = item.altStore;
+                            } else {
+                                const newQtys = {};
+                                if (item.count !== 'pantry') {
+                                    item.count.split(',').forEach(part => {
+                                        part = part.trim();
+                                        const m = part.match(/^([\d.]+)\s+(.+)$/);
+                                        if (m) newQtys[m[2].trim()] = parseFloat(m[1]);
+                                    });
+                                }
+                                mergedByName[key] = {
+                                    name: item.name, quantities: newQtys,
+                                    isPantry: item.isPantry,
+                                    defaultUnit: item.defaultUnit, preferredBrand: item.preferredBrand,
+                                    category: item.category, preferredStore: item.preferredStore,
+                                    altStore: item.altStore, matchStatus: item.matchStatus, wasCombined: false
+                                };
+                                console.log('[MERGE] appended new item:', key, item.count);
+                            }
+                        });
+
+                        finalItems = Object.values(mergedByName).map(item => {
+                            const count = (item.isPantry || Object.keys(item.quantities).length === 0)
+                                ? 'pantry'
+                                : Object.entries(item.quantities).map(([u, q]) => q + ' ' + u).join(', ');
+                            return { ...item, count };
+                        }).sort((a, b) => {
+                            if (a.isPantry && !b.isPantry) return 1;
+                            if (!a.isPantry && b.isPantry) return -1;
+                            if (a.preferredStore !== b.preferredStore)
+                                return a.preferredStore.localeCompare(b.preferredStore);
+                            return a.name.localeCompare(b.name);
+                        });
+
+                        console.log('[MERGE] final:', finalItems.map(i => i.name + ' | ' + i.count));
+                        setSubmitStatus('\u23f3 Merged \u2014 writing to sheet...');
+                    }
+
+                    // Step 3: Create tab if it doesn't exist yet
+                    if (!tabAlreadyExists) {
+                        const addSheetRes = await fetch(
+                            `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}:batchUpdate`,
+                            {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${freshToken}` },
+                                body: JSON.stringify({ requests: [{ addSheet: { properties: { title: tabName } } }] })
+                            }
+                        );
+                        if (!addSheetRes.ok) {
+                            const addErr = await addSheetRes.json().catch(() => ({}));
+                            const msg = (addErr.error?.message || '').toLowerCase();
+                            if (!msg.includes('already exists')) {
+                                throw new Error(addErr.error?.message || 'Failed to create sheet tab');
+                            }
                         }
                     }
 
-                    // Step 2: Write data into the tab
+                    // Step 4a: Write merged data
                     const headers = ['Items', 'Units', 'Default Unit', 'Preferred Brand', 'Category', 'Preferred Store', 'Alt Store'];
-                    const rows = consolidated.map(item => [
-                        item.name,
-                        item.count,
-                        item.defaultUnit,
-                        item.preferredBrand,
-                        item.category,
-                        item.preferredStore,
-                        item.altStore
+                    const rows = finalItems.map(item => [
+                        item.name, item.count, item.defaultUnit,
+                        item.preferredBrand, item.category, item.preferredStore, item.altStore
                     ]);
-                    const values = [headers, ...rows];
+
+                    // Clear entire sheet first to remove any stale rows from previous submission
+                    await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}/values/${encodeURIComponent(tabName) + '!A:G'}:clear`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${freshToken}` }
+                        }
+                    );
 
                     const writeRes = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}/values/${encodeURIComponent(tabName + '!A1')}?valueInputOption=RAW`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}/values/${encodeURIComponent(tabName) + '!A1'}?valueInputOption=RAW`,
                         {
                             method: 'PUT',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${freshToken}`
-                            },
-                            body: JSON.stringify({ values })
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${freshToken}` },
+                            body: JSON.stringify({ values: [headers, ...rows] })
                         }
                     );
 
@@ -989,7 +1195,7 @@
                         throw new Error(err.error?.message || 'Failed to write data');
                     }
 
-                    // Step 3: Get the new sheet's ID for formatting
+                    // Step 4b: Get sheet's numeric ID for formatting
                     const metaRes = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${SUBMIT_SHEET_ID}?fields=sheets.properties`,
                         { headers: { 'Authorization': `Bearer ${freshToken}` } }
@@ -998,14 +1204,13 @@
                     const sheetObj = meta.sheets.find(s => s.properties.title === tabName);
                     const sheetId = sheetObj ? sheetObj.properties.sheetId : 0;
 
-                    // Step 4: Apply formatting via batchUpdate
-                    // Row colors: green=consolidated, amber50=pantry, amber200=combined pantry, red=not-found, white=normal
+                    // Step 4c: Apply formatting
                     const colorMap = {
-                        'not-found':      { r: 1,    g: 0.8,  b: 0.8  },  // red-100
-                        'pantry-single':  { r: 1,    g: 0.98, b: 0.94 },  // amber-50
-                        'pantry-combined':{ r: 1,    g: 0.91, b: 0.71 },  // amber-200
-                        'consolidated':   { r: 0.88, g: 0.96, b: 0.88 },  // green-100
-                        'normal':         { r: 1,    g: 1,    b: 1    }
+                        'not-found':      { red: 1,    green: 0.8,  blue: 0.8  },
+                        'pantry-single':  { red: 1,    green: 0.98, blue: 0.94 },
+                        'pantry-combined':{ red: 1,    green: 0.91, blue: 0.71 },
+                        'consolidated':   { red: 0.88, green: 0.96, blue: 0.88 },
+                        'normal':         { red: 1,    green: 1,    blue: 1    }
                     };
 
                     function getRowColor(item) {
@@ -1018,7 +1223,6 @@
 
                     const formatRequests = [];
 
-                    // Bold + dark background for header row
                     formatRequests.push({
                         repeatCell: {
                             range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 7 },
@@ -1033,8 +1237,7 @@
                         }
                     });
 
-                    // Row colors for data rows
-                    consolidated.forEach((item, i) => {
+                    finalItems.forEach((item, i) => {
                         const color = getRowColor(item);
                         formatRequests.push({
                             repeatCell: {
@@ -1045,7 +1248,6 @@
                         });
                     });
 
-                    // Freeze header row
                     formatRequests.push({
                         updateSheetProperties: {
                             properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
@@ -1053,7 +1255,6 @@
                         }
                     });
 
-                    // Auto-resize all columns
                     formatRequests.push({
                         autoResizeDimensions: {
                             dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 7 }
@@ -1069,7 +1270,9 @@
                         }
                     );
 
-                    setSubmitStatus(`✓ Submitted to tab "${tabName}"`);
+                    const mergeNote = finalItems.length !== consolidated.length || tabAlreadyExists
+                        ? ` (merged ${finalItems.length} items)` : '';
+                    setSubmitStatus(`✓ Submitted to tab "${tabName}"${mergeNote}`);
                     setTimeout(() => setSubmitStatus(''), 6000);
                 } catch (error) {
                     setSubmitStatus(`✗ Error: ${error.message}`);
