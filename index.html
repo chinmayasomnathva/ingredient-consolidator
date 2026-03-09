@@ -159,9 +159,9 @@
                     }
                 }
                 
-                // Strip parenthetical content from searchTerm
-                // e.g. "jira (cumin)" after synonym substitution → "cumin (cumin)" → "cumin"
-                searchTerm = searchTerm.replace(/\([^)]+\)/g, '').replace(/\s+/g, ' ').trim();
+                // Keep parenthetical content in searchTerm but remove the parens
+                // e.g. "black pepper (red)" → "black pepper red" for matching
+                searchTerm = searchTerm.replace(/\(([^)]+)\)/g, (match, inner) => ' ' + inner).replace(/\s+/g, ' ').trim();
 
                 console.log('[MATCH] input:', inputLower, '=> searchTerm:', searchTerm);
                 // Extract main noun (last word) and adjectives (other words)
@@ -195,17 +195,49 @@
                     let similarity = calculateSimilarity(searchTerm, keyForMatch);
                     
                     // BLOCKLIST: Prevent compound masala/spice blends from matching simple ingredients
-                    // e.g., "Kanda Lasun Masala (Onion Garlic)" should NOT match "onion" or "garlic"
-                    const compoundMasalaPattern = /\b(masala|blend|spice mix|seasoning)\b/i;
+                    // e.g., "Kanda Lasun Masala (Onion Garlic)" should NOT match "onion", "garlic", "garlic pods"
+                    const compoundMasalaPattern = /\b(masala|blend|spice mix|seasoning|powder)\b/i;
                     const isCompoundMasala = compoundMasalaPattern.test(key);
-                    const inputIsSimple = searchTerm.split(/\s+/).length <= 2;
+                    const inputWords2 = searchTerm.split(/\s+/).filter(w => w.length > 2);
+                    const inputIsSimple = inputWords2.length <= 2;
                     if (isCompoundMasala && inputIsSimple) {
-                        // Only allow if the input itself contains "masala" or "spice"
-                        if (!/(masala|spice|seasoning|blend)/i.test(searchTerm)) {
+                        // Only allow if the input itself contains "masala", "spice", "powder", "seasoning", or "blend"
+                        if (!/(masala|spice|seasoning|blend|powder)/i.test(searchTerm)) {
                             continue; // Skip this match entirely
                         }
                     }
+                    // Extra block: if expanded key has two distinct main ingredients (e.g. "onion garlic")
+                    // and input only matches one of them, skip — prevents "garlic pods" → "Kanda Lasun Masala (Onion Garlic)"
+                    const multiIngredientParen = /\(([^)]+)\)/g;
+                    let parenMatch;
+                    let skipDueToMultiIngredient = false;
+                    const tempKey = key;
+                    while ((parenMatch = multiIngredientParen.exec(tempKey)) !== null) {
+                        const parenWords = parenMatch[1].toLowerCase().split(/[\s,\/]+/).filter(w => w.length > 2);
+                        const inputMatchesAll = parenWords.every(pw => searchTerm.includes(pw));
+                        if (parenWords.length >= 2 && !inputMatchesAll) {
+                            skipDueToMultiIngredient = true;
+                            break;
+                        }
+                    }
+                    if (skipDueToMultiIngredient) continue;
                     
+                    // BRAND NUMBER GUARD: if input contains a standalone brand number (e.g. "777"),
+                    // the master key must also contain that exact number — prevents "sambhar powder 777"
+                    // from matching "amchoor powder 777" just because both have "777" and "powder"
+                    const brandNumberMatch = searchTerm.match(/\b(\d{2,})\b/);
+                    if (brandNumberMatch) {
+                        const brandNum = brandNumberMatch[1];
+                        if (!key.includes(brandNum) && !keyForMatch.includes(brandNum)) {
+                            continue; // Skip — brand number not in master key
+                        }
+                        // Also require the non-number words to actually match well
+                        const inputWithoutNum = searchTerm.replace(/\b\d+\b/g, '').replace(/\s+/g, ' ').trim();
+                        const keyWithoutNum = keyForMatch.replace(/\b\d+\b/g, '').replace(/\s+/g, ' ').trim();
+                        const baseSimlarity = calculateSimilarity(inputWithoutNum, keyWithoutNum);
+                        if (baseSimlarity < 0.4) continue; // Brand matches but ingredient words don't
+                    }
+
                     // Boost matches that contain the main noun
                     const masterWords = key.split(/\s+/);
                     const masterNoun = masterWords[masterWords.length - 1];
@@ -490,8 +522,19 @@
 
             function normalizeIngredientName(name) {
                 let normalized = name.toLowerCase().trim();
-                // Strip parenthetical content like "(777 brand)", "(onion garlic)", etc.
-                normalized = normalized.replace(/\([^)]+\)/g, '').trim();
+                // Keep parenthetical content but remove the parens themselves
+                // e.g. "Black Pepper (Red)" → "black pepper red"
+                // e.g. "777 Sambhar Powder (brand)" → "777 sambhar powder brand" → brand word stripped below
+                // Exception: strip pure brand/store annotations like "(777 brand)", "(costco)", "(trader joe's)"
+                normalized = normalized.replace(/\(([^)]+)\)/g, (match, inner) => {
+                    const innerLower = inner.toLowerCase().trim();
+                    // Strip if it's clearly a brand/store annotation
+                    if (/^(brand|store|costco|trader joe|restaurant depot|organic|optional|adjust to taste)$/i.test(innerLower)) {
+                        return '';
+                    }
+                    // Keep the content
+                    return ' ' + innerLower;
+                });
                 normalized = normalized.replace(/-/g, ' ');
                 
                 const isPepper = normalized.includes('pepper') && !normalized.includes('crushed') && !normalized.includes('flakes');
@@ -719,11 +762,31 @@
                 const matchedIngredients = {};
                 
                 for (const [name, item] of Object.entries(allIngredients)) {
-                    // Try exact match first
+                    // Try exact match first (raw normalized name)
                     let masterMatch = masterData.lookup[name];
                     let matchStatus = 'exact';
                     
-                    // If no exact match, try fuzzy matching with category context
+                    // If no exact match, try direct lookup against all master keys with full phrase
+                    // This catches cases like "baby corn" where adjective stripping would lose the match
+                    if (!masterMatch) {
+                        // Try matching the full input phrase directly against master keys (before any word stripping)
+                        for (const [masterKey, masterVal] of Object.entries(masterData.lookup)) {
+                            const strippedMasterKey = masterKey.replace(/\(([^)]+)\)/g, (_, inner) => ' ' + inner.replace(/[-–]/g, ' ')).replace(/\s+/g, ' ').trim();
+                            if (strippedMasterKey === name || masterKey === name) {
+                                masterMatch = masterVal;
+                                matchStatus = 'exact';
+                                break;
+                            }
+                            // Also check if input is contained in master key or vice versa as full phrase
+                            if (strippedMasterKey.startsWith(name + ' ') || strippedMasterKey.endsWith(' ' + name) || strippedMasterKey === name) {
+                                masterMatch = masterVal;
+                                matchStatus = 'exact';
+                                break;
+                            }
+                        }
+                    }
+
+                    // If still no match, try fuzzy matching with category context
                     if (!masterMatch) {
                         const fuzzyMatches = fuzzyMatchWithCategory(name, masterData);
                         
@@ -827,6 +890,14 @@
                     }
                 }
 
+                // Format quantity: integers stay as integers, fractions < 1 get 2 decimal places, others get no trailing zeros
+                function formatQty(qty) {
+                    if (Number.isInteger(qty)) return String(qty);
+                    if (qty < 1) return qty.toFixed(2);
+                    // Round to reasonable precision, strip trailing zeros
+                    return parseFloat(qty.toPrecision(6)).toString();
+                }
+
                 // Step 3: Create final output
                 const result = Object.entries(consolidatedByStandardName).map(([name, item]) => {
                     if (item.isPantry) {
@@ -845,7 +916,7 @@
                     }
 
                     const quantityStrings = Object.entries(item.quantities)
-                        .map(([unit, qty]) => `${qty} ${unit}`);
+                        .map(([unit, qty]) => `${formatQty(qty)} ${unit}`);
 
                     return {
                         name: name,
@@ -931,7 +1002,7 @@
             }
 
             function copyToGoogleSheets() {
-                const headers = ['Items', 'Quantity', 'Units', 'Default Unit', 'Preferred Brand', 'Category', 'Preferred Store', 'Alt Store'];
+                const headers = ['Items', 'Quantity', 'Units', 'Default Unit', 'Preferred Store'];
                 const rows = consolidated.map(item => {
                     let qty = '', unit = '';
                     if (item.count === 'pantry') {
@@ -940,7 +1011,7 @@
                         qty = item.count.split(',').map(p => p.trim().replace(/^([\d.]+)\s+.*$/, '$1')).join(', ');
                         unit = item.count.split(',').map(p => p.trim().replace(/^[\d.]+\s+(.+)$/, '$1')).join(', ');
                     }
-                    return [item.name, qty, unit, item.defaultUnit, item.preferredBrand, item.category, item.preferredStore, item.altStore];
+                    return [item.name, qty, unit, item.defaultUnit, item.preferredStore];
                 });
                 const tsvContent = [headers, ...rows].map(row => row.join('\t')).join('\n');
 
@@ -1466,10 +1537,7 @@
                                                 <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Quantity</th>
                                                 <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Units</th>
                                                 <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Default Unit</th>
-                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Preferred Brand</th>
-                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Category</th>
                                                 <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Preferred Store</th>
-                                                <th className="border border-gray-300 px-4 py-3 text-left font-semibold">Alt Store</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1498,10 +1566,7 @@
                                                             {item.count === 'pantry' ? '' : item.count.split(',').map(p => p.trim().replace(/^[\d.]+\s+(.+)$/, '$1')).join(', ')}
                                                         </td>
                                                         <td className="border border-gray-300 px-4 py-2">{item.defaultUnit}</td>
-                                                        <td className="border border-gray-300 px-4 py-2">{item.preferredBrand}</td>
-                                                        <td className="border border-gray-300 px-4 py-2">{item.category}</td>
                                                         <td className="border border-gray-300 px-4 py-2">{item.preferredStore}</td>
-                                                        <td className="border border-gray-300 px-4 py-2">{item.altStore}</td>
                                                     </tr>
                                                 );
                                             })}
