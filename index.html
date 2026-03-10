@@ -126,8 +126,11 @@
                     'jira': 'cumin',
                     'jeera': 'cumin',
                     'zeera': 'cumin',
-                    'coriander': 'cilantro',
                     'coriander leaf': 'cilantro',
+                    'coriander leaves': 'cilantro',
+                    'fresh coriander': 'cilantro',
+                    // Note: bare "coriander" is intentionally NOT mapped to cilantro —
+                    // "coriander powder" and "coriander seeds" are distinct spices, not leaves
                     'curry leaf': 'curry leaves',
                     'tomato': 'tomatoes',
                     'chickpea': 'garbanzo beans',
@@ -142,11 +145,16 @@
                     'elbow pasta': 'pasta penne rigatoni elbow',
                     'mixed bell pepper': 'bell peppers mixed',
                     'bell pepper': 'bell peppers',
+                    'capsicum': 'bell peppers',
                     'butter sticks': 'unsalted butter sticks',
                     'butter': 'unsalted butter sticks',
                     'peanut butter': 'peanut butter',
                     'almond butter': 'almond butter',
-                    'nut butter': 'nut butter'
+                    'nut butter': 'nut butter',
+                    'spring onion': 'green onions',
+                    'spring onions': 'green onions',
+                    'scallion': 'green onions',
+                    'scallions': 'green onions',
                 };
                 
                 // Check if input has a known synonym — prefer longest matching key
@@ -242,14 +250,34 @@
                     const masterWords = key.split(/\s+/);
                     const masterNoun = masterWords[masterWords.length - 1];
                     
-                    // If master item contains the input noun, boost similarity
-                    if (keyForMatch.includes(inputNoun)) {
+                    // Record raw similarity before boosts so we can cap appropriately
+                    const rawSimilarity = similarity;
+                    
+                    // Generic nouns (seed, powder, sauce, oil, etc.) are shared across many items.
+                    // Only apply noun boost when the noun is specific (not a generic category word).
+                    const genericNouns = new Set(['seed', 'seeds', 'powder', 'sauce', 'oil', 'paste',
+                        'water', 'juice', 'flour', 'extract', 'flakes', 'leaves', 'leaf', 'root',
+                        'peel', 'milk', 'cream', 'butter', 'vinegar', 'syrup', 'stock', 'broth']);
+                    const isGenericNoun = genericNouns.has(inputNoun.toLowerCase());
+                    
+                    // If master item contains the input noun, boost similarity (skip generic nouns)
+                    if (!isGenericNoun && keyForMatch.includes(inputNoun)) {
                         similarity = Math.min(1.0, similarity * 1.2); // 20% boost for noun match
                     }
                     
                     // Boost similarity if in the same category as the likely match
                     if (likelyCategory && data.category.toLowerCase() === likelyCategory) {
                         similarity = Math.min(1.0, similarity * 1.3); // 30% boost for same category
+                    }
+                    
+                    // Safety cap: prevent boosts from inflating low-confidence scores.
+                    // Low base scores (< 0.60) — e.g. "tomatoes" vs "Tomato Ketchup" (0.55 base) —
+                    // should never appear as strong matches even after category/noun boosts.
+                    // Medium base scores (< 0.90) should never reach auto-match territory (> 0.95).
+                    if (rawSimilarity < 0.60) {
+                        similarity = Math.min(similarity, 0.75); // low confidence → clearly resolver-level
+                    } else if (rawSimilarity < 0.90) {
+                        similarity = Math.min(similarity, 0.94); // medium → resolver but not auto-match
                     }
                     
                     if (similarity >= threshold) {
@@ -328,6 +356,39 @@
                     return 0.3;
                 }
                 
+                // Color/qualifier mismatch guard:
+                // If input has a color/qualifier (black, white, red, green, yellow) AND
+                // master has a DIFFERENT color/qualifier for the same base noun, penalize heavily.
+                const colorQualifiers = ['black', 'white', 'red', 'green', 'yellow', 'purple', 'brown', 'dark', 'light'];
+                const str1Words = str1.split(/\s+/);
+                const str2Words = str2.split(/\s+/);
+                const str1Colors = str1Words.filter(w => colorQualifiers.includes(w.toLowerCase()));
+                const str2Colors = str2Words.filter(w => colorQualifiers.includes(w.toLowerCase()));
+                if (str1Colors.length > 0 && str2Colors.length > 0) {
+                    const colorsMatch = str1Colors.some(c => str2Colors.includes(c));
+                    if (!colorsMatch) {
+                        return 0.50; // Different colors = resolver boundary
+                    }
+                }
+                
+                // Form/preparation mismatch guard:
+                // If input has a "form" word (seeds, oil, powder, paste, chips, ketchup, etc.) AND
+                // master has a DIFFERENT form word, they are substantively different products.
+                // e.g. "mustard seeds" vs "mustard oil", "potato" vs "potato chips"
+                // This prevents false matches between different preparations of the same ingredient.
+                const formWords = new Set(['seeds', 'seed', 'oil', 'powder', 'paste', 'leaf', 'leaves',
+                    'sauce', 'juice', 'extract', 'flakes', 'chips', 'ketchup', 'starch',
+                    'flour', 'vinegar', 'butter', 'cream']);
+                const str1Forms = str1Words.filter(w => formWords.has(w.toLowerCase()));
+                const str2Forms = str2Words.filter(w => formWords.has(w.toLowerCase()));
+                // If both have form words and they differ → cap at 0.45 (below resolver threshold)
+                if (str1Forms.length > 0 && str2Forms.length > 0) {
+                    const formsMatch = str1Forms.some(f => str2Forms.includes(f));
+                    if (!formsMatch) {
+                        return 0.40; // Different forms = different products, never show in resolver
+                    }
+                }
+
                 // Check if shorter is contained in longer
                 if (longer.includes(shorter)) {
                     // If input (shorter) is a complete word match in master (longer)
@@ -360,8 +421,9 @@
                                 // "spinach" → "baby spinach" or "onion" → "red onion"
                                 return 0.80; // High enough to show in resolution but not auto-match
                             } else {
-                                // "potato" → "potato chips" (chips is not a descriptor)
-                                return 0.60;
+                                // "potato" → "potato chips" (chips is substantive, not a descriptor)
+                                // Lower than descriptor-variant score so these rank last in resolver
+                                return 0.55;
                             }
                         } else {
                             return 0.5;
@@ -408,15 +470,26 @@
                     );
                     const allExtrasAreDescriptors = extraMasterWords.every(w => descriptorSet.has(w));
                     if (allExtrasAreDescriptors) return 0.85;
+                    // If any extra master word is a form/product word (ketchup, paste, sauce, etc.)
+                    // the master item is a COMPOUND/PROCESSED product, not the raw ingredient.
+                    // Score 0.55 so it ranks low in the resolver and doesn't appear as a strong match.
+                    // e.g. "tomatoes" vs "Tomato Ketchup" — ketchup is a form word → 0.55
+                    // e.g. "garlic" vs "Garlic Paste" — paste is a form word → 0.55
+                    const extraHasFormWord = extraMasterWords.some(w => formWords.has(w));
+                    if (extraHasFormWord) return 0.55;
                     return 0.70;
                 }
 
                 // Most input words matched → decent match
                 if (inputCoverage >= 0.66) return 0.60;
 
-                // Calculate edit distance as fallback
+                // Calculate edit distance as fallback.
+                // Apply a 0.95 discount so borderline cases (score exactly 0.50) fall
+                // below the resolver threshold. This prevents "whole milk" from appearing
+                // as a resolver candidate for "coconut milk" (both share only the word "milk").
+                // Legitimate matches with real similarity (≥0.53 raw) still pass through.
                 const editDistance = levenshteinDistance(str1, str2);
-                return (longer.length - editDistance) / longer.length;
+                return ((longer.length - editDistance) / longer.length) * 0.95;
             }
 
             function levenshteinDistance(str1, str2) {
@@ -463,7 +536,7 @@
             function parseQuantity(text) {
                 // Fraction-aware number pattern: matches "1/4", "2 1/4", "0.5", "3" etc.
                 const numPat = '(?:\\d+\\s+)?(?:\\d+\\/\\d+|\\d*\\.?\\d+)';
-                const unitList = 'lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?|nos?';
+                const unitList = 'lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|box(?:es)?|bunch(?:es)?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?|nos?';
                 const unitPattern = new RegExp(`(${numPat})\\s*(${unitList})`, 'gi');
 
                 let lastMatch = null;
@@ -539,7 +612,8 @@
                 
                 const isPepper = normalized.includes('pepper') && !normalized.includes('crushed') && !normalized.includes('flakes');
                 const isBread = normalized.includes('bread') || normalized.includes('rice');
-                const isChili = normalized.includes('chili') || normalized.includes('chilli');
+                const isChili = normalized.includes('chili') || normalized.includes('chilli') || normalized.includes('chilly');
+                const isMilk = normalized.includes('milk') || normalized.includes('cream') || normalized.includes('dairy') || normalized.includes('yogurt') || normalized.includes('curd');
                 const isApple = normalized.includes('apple');
                 const isOnion = normalized.includes('onion');
                 const isTomato = normalized.includes('tomato');
@@ -568,6 +642,12 @@
                 if (!isPepper && !isBread && !isChili && !isApple && !isOnion && !isTomato && !isBellPepper && !isPeas && !isPumpkin && !isSalt && !isCardamom && !isMustard && !isGrape && !isBean2) {
                     removeWords.push('red', 'green', 'yellow', 'white', 'black', 'purple');
                 }
+                // Protect 'whole' for milk/dairy items — "whole milk" must not strip to "milk"
+                // which would then match "coconut milk" or other unrelated milk products.
+                if (isMilk) {
+                    const idx = removeWords.indexOf('whole');
+                    if (idx > -1) removeWords.splice(idx, 1);
+                }
                 // Protect "mixed" for bell peppers, "english" for cucumbers
                 if (isBellPepper) {
                     const idx = removeWords.indexOf('mixed');
@@ -576,6 +656,8 @@
                 if (isCucumber) {
                     const idx = removeWords.indexOf('english');
                     if (idx > -1) removeWords.splice(idx, 1);
+                    const idx2 = removeWords.indexOf('long');
+                    if (idx2 > -1) removeWords.splice(idx2, 1);
                 }
                 // For bean/chickpea inputs, remove "peas" (noise from "chickpeas peas")
                 if (isBean) {
@@ -594,6 +676,8 @@
                 normalized = normalized.replace(/\s+/g, ' ').trim();
                 
                 normalized = normalized.replace(/\bgarlic\s+clove[s]?\b/gi, 'garlic');
+                // Normalize "pepper corns" → "peppercorns", "pepper corn" → "peppercorn"
+                normalized = normalized.replace(/\bpepper\s+corns?\b/gi, 'peppercorns');
                 
                 const pluralMap = {
                     'tomatoes': 'tomato', 'potatoes': 'potato', 'onions': 'onion',
@@ -616,6 +700,13 @@
                 line = line.trim();
                 if (!line) return null;
                 
+                // Detect section headers: a single word (or short phrase) followed only by a
+                // parenthesized number and nothing else — e.g. "Thandai (45)", "Breakfast (20)"
+                // These are serving-count annotations, not ingredient lines.
+                if (/^[A-Za-z][A-Za-z\s]*\s*\(\d+\)\s*$/.test(line) && !line.includes('-')) {
+                    return null;
+                }
+                
                 // Strip leading bullet characters (including unicode bullets)
                 line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219•\-\*]\s*/, '');
                 line = line.replace(/^\d+[\.)]\s*/, '');
@@ -632,7 +723,7 @@
                 
                 if (parsed.quantity > 0) {
                     // Fraction-aware unit strip: matches "1/4 lbs", "2 1/4 oz", "3 lbs", "60-75 nos" etc.
-                    const unitPattern = /(?:\d+\s+)?(?:\d+\/\d+|\d*\.?\d+)\s*(?:-\s*(?:\d+\s+)?(?:\d+\/\d+|\d*\.?\d+)\s*)?(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|boxes?|bunches?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?|nos?)\b/gi;
+                    const unitPattern = /(?:\d+\s+)?(?:\d+\/\d+|\d*\.?\d+)\s*(?:-\s*(?:\d+\s+)?(?:\d+\/\d+|\d*\.?\d+)\s*)?(lbs?|pounds?|oz|ounces?|gallons?|cups?|packs?|packets?|jars?|bottles?|blocks?|box(?:es)?|bunch(?:es)?|cartons?|stalks?|cloves?|count|cans?|tins?|bags?|sticks?|gms?|grams?|nos?)\b/gi;
                     const matches = [...protectedLine.matchAll(unitPattern)];
                     
                     if (matches.length > 0) {
@@ -706,7 +797,7 @@
                 });
                 setLists(numberedLists);
 
-                lists.forEach((list, listIndex) => {
+                numberedLists.forEach((list, listIndex) => {
                     if (!list.trim()) return;
 
                     let itemCount = 0;
@@ -766,19 +857,28 @@
                     let masterMatch = masterData.lookup[name];
                     let matchStatus = 'exact';
                     
-                    // If no exact match, try direct lookup against all master keys with full phrase
-                    // This catches cases like "baby corn" where adjective stripping would lose the match
+                    // Tier 2: EXACT base-key match only.
+                    // Purpose: catch items like "baby corn" that exactly equal the base name of
+                    // a master entry like "Baby Corn (frozen)".
+                    //
+                    // CRITICAL RULE: only match when input == baseKey EXACTLY.
+                    // Do NOT use startsWith/endsWith/includes — those cause silent false matches:
+                    //   "tomato" startsWith-matches "Tomato Ketchup" → wrong auto-match
+                    //   "garlic" startsWith-matches "Garlic Paste", "Garlic Pods" → wrong auto-match
+                    //   "garlic" endsWith-matches "Minced Garlic" → wrong auto-match
+                    // All such cases should go to fuzzy → resolver dialog, not be auto-matched here.
                     if (!masterMatch) {
-                        // Try matching the full input phrase directly against master keys (before any word stripping)
                         for (const [masterKey, masterVal] of Object.entries(masterData.lookup)) {
-                            const strippedMasterKey = masterKey.replace(/\(([^)]+)\)/g, (_, inner) => ' ' + inner.replace(/[-–]/g, ' ')).replace(/\s+/g, ' ').trim();
-                            if (strippedMasterKey === name || masterKey === name) {
+                            const baseKey = masterKey.replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+                            if (baseKey === name || masterKey.toLowerCase() === name) {
                                 masterMatch = masterVal;
                                 matchStatus = 'exact';
                                 break;
                             }
-                            // Also check if input is contained in master key or vice versa as full phrase
-                            if (strippedMasterKey.startsWith(name + ' ') || strippedMasterKey.endsWith(' ' + name) || strippedMasterKey === name) {
+                            // Only additional case: hyphens/dashes in master key treated as spaces
+                            // e.g. "dal-makhani" in master → "dal makhani" matches input "dal makhani"
+                            const baseKeyDashNorm = baseKey.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+                            if (baseKeyDashNorm === name) {
                                 masterMatch = masterVal;
                                 matchStatus = 'exact';
                                 break;
@@ -1138,7 +1238,7 @@
                     }
 
                     // Step 3: Write data — Quantity and Units as separate columns
-                    const headers = ['Items', 'Quantity', 'Units', 'Default Unit', 'Preferred Brand', 'Category', 'Preferred Store', 'Alt Store'];
+                    const headers = ['Items', 'Quantity', 'Units', 'Default Unit', 'Preferred Store'];
                     const rows = consolidated.map(item => {
                         let qty = '', unit = '';
                         if (item.count === 'pantry') {
@@ -1147,7 +1247,7 @@
                             qty = item.count.split(',').map(p => p.trim().replace(/^([\d.]+)\s+.*$/, '$1')).join(', ');
                             unit = item.count.split(',').map(p => p.trim().replace(/^[\d.]+\s+(.+)$/, '$1')).join(', ');
                         }
-                        return [item.name, qty, unit, item.defaultUnit, item.preferredBrand, item.category, item.preferredStore, item.altStore];
+                        return [item.name, qty, unit, item.defaultUnit, item.preferredStore];
                     });
 
                     const writeRes = await fetch(
@@ -1172,7 +1272,7 @@
                     const meta2 = await meta2Res.json();
                     const sheetObj = meta2.sheets.find(s => s.properties.title === tabName);
                     const sheetId = sheetObj ? sheetObj.properties.sheetId : 0;
-                    const numCols = 8;
+                    const numCols = 5;
 
                     // Step 5: Apply formatting
                     const colorMap = {
