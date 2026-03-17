@@ -59,8 +59,8 @@
                 setMasterError('');
                 
                 try {
-                    const range = `${SHEET_NAME}!A:F`; // Items, Default Unit, Preferred Brand, Category, Preferred Store, Alt Store
-                    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/Master_Items?key=${apiKey}`;
+                    const range = `Master_Items!A:F`; // Tab is Master_Items; columns: Items, Default Unit, Preferred Brand, Category, Preferred Store, Alt Store
+                    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?key=${apiKey}`;
                     
                     const response = await fetch(url);
                     if (!response.ok) {
@@ -155,6 +155,19 @@
                     'spring onions': 'green onions',
                     'scallion': 'green onions',
                     'scallions': 'green onions',
+                    // Legumes — regional names with zero lexical overlap
+                    'lobia': 'black eyed peas',
+                    'lobiya': 'black eyed peas',
+                    'black eyed bean': 'black eyed peas',
+                    'black eyed beans': 'black eyed peas',
+                    // Rotis / flatbreads
+                    'roti': 'rotis',
+                    'rotis': 'rotis',
+                    'chapati': 'rotis',
+                    'chapatis': 'rotis',
+                    // Coconut brand variants — "Daily Delight" is a brand name, not a descriptor
+                    'coconut daily delight': 'coconut shredded',
+                    'daily delight coconut': 'coconut shredded',
                 };
                 
                 // Check if input has a known synonym — prefer longest matching key
@@ -204,13 +217,16 @@
                     
                     // BLOCKLIST: Prevent compound masala/spice blends from matching simple ingredients
                     // e.g., "Kanda Lasun Masala (Onion Garlic)" should NOT match "onion", "garlic", "garlic pods"
-                    const compoundMasalaPattern = /\b(masala|blend|spice mix|seasoning|powder)\b/i;
+                    // NOTE: 'powder' is intentionally excluded — single-ingredient powders like
+                    // "Turmeric Powder" must remain reachable when input is "turmeric".
+                    // The form-mismatch guard in calculateSimilarity handles conflicting form words.
+                    const compoundMasalaPattern = /\b(masala|blend|spice mix|seasoning)\b/i;
                     const isCompoundMasala = compoundMasalaPattern.test(key);
                     const inputWords2 = searchTerm.split(/\s+/).filter(w => w.length > 2);
                     const inputIsSimple = inputWords2.length <= 2;
                     if (isCompoundMasala && inputIsSimple) {
-                        // Only allow if the input itself contains "masala", "spice", "powder", "seasoning", or "blend"
-                        if (!/(masala|spice|seasoning|blend|powder)/i.test(searchTerm)) {
+                        // Only allow if the input itself contains "masala", "spice", "seasoning", or "blend"
+                        if (!/(masala|spice|seasoning|blend)/i.test(searchTerm)) {
                             continue; // Skip this match entirely
                         }
                     }
@@ -414,7 +430,9 @@
                                                'organic', 'large', 'small', 'whole', 'chopped', 'diced',
                                                'sliced', 'ground', 'big', 'packet', 'pack', 'bundle',
                                                'loose', 'extra', 'mixed', 'english', 'long', 'mini',
-                                               'seedless', 'boneless', 'skinless', 'shelled', 'pitted'];
+                                               'seedless', 'boneless', 'skinless', 'shelled', 'pitted',
+                                               'shredded', 'grated', 'crushed', 'peeled', 'roasted',
+                                               'unsalted', 'salted', 'plain', 'pure', 'natural'];
                             const hasOnlyDescriptors = otherWords.every(word => descriptors.includes(word.toLowerCase()));
                             
                             if (hasOnlyDescriptors) {
@@ -445,7 +463,8 @@
                 const descriptorSet = new Set(['frozen','fresh','canned','dried','raw','cooked',
                     'baby','red','white','green','yellow','black','organic','large','small','whole',
                     'chopped','diced','sliced','ground','big','packet','pack','bundle','loose','extra',
-                    'mixed','english','long','mini','seedless','boneless','skinless','shelled','pitted']);
+                    'mixed','english','long','mini','seedless','boneless','skinless','shelled','pitted',
+                    'shredded','grated','crushed','peeled','roasted','unsalted','salted','plain','pure','natural']);
 
                 // Count how many input words appear in master words (with s/plural tolerance)
                 let matchedInputWords = 0;
@@ -630,13 +649,15 @@
                 
                 const removeWords = [
                     'twin pack', 'costco', 'restaurant depot', 'trader joe',
+                    'patel', 'patel brothers', 'whole foods', 'kroger', 'walmart',
                     'organic', 'extra virgin', 'virgin', 'unsalted', 'salted',
                     'fresh', 'frozen', 'canned',
+                    'plain', 'simple', 'regular', 'classic',
                     'shredded', 'diced', 'chopped', 'sliced', 'whole', 'peeled',
                     'flat leaf', 'baby', 'purée', 'puree', 'pantry',
                     'big', 'large', 'small', 'medium', 'packet', 'pack', 'bundle',
                     'mixed', 'english', 'long', 'mini', 'seedless', 'boneless', 'skinless',
-                    'or', 'and', 'of', 'the', 'a', 'an', 'with', 'in', 'on', 'for', 'to'
+                    'from', 'or', 'and', 'of', 'the', 'a', 'an', 'with', 'in', 'on', 'for', 'to'
                 ];
                 
                 if (!isPepper && !isBread && !isChili && !isApple && !isOnion && !isTomato && !isBellPepper && !isPeas && !isPumpkin && !isSalt && !isCardamom && !isMustard && !isGrape && !isBean2) {
@@ -1374,7 +1395,21 @@
                                 </p>
                             </div>
                         )}
-                        {!masterData && (
+                        {loadingMaster && (
+                            <div className="bg-blue-50 rounded-lg p-4 mb-6 border border-blue-200">
+                                <p className="text-blue-800 font-semibold">
+                                    ⏳ Loading master list…
+                                </p>
+                            </div>
+                        )}
+                        {!masterData && !loadingMaster && masterError && (
+                            <div className="bg-red-50 rounded-lg p-4 mb-6 border border-red-200">
+                                <p className="text-red-800 font-semibold">
+                                    ✗ Failed to load master list: {masterError}
+                                </p>
+                            </div>
+                        )}
+                        {!masterData && !loadingMaster && !masterError && (
                             <div className="bg-yellow-50 rounded-lg p-4 mb-6 border border-yellow-200">
                                 <p className="text-yellow-800 font-semibold">
                                     ⚠ Master data not loaded. Please configure API key in the code.
