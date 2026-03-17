@@ -98,7 +98,14 @@ normalized = normalized.replace(/\(([^)]+)\)/g, (match, inner) => {
 Only strip colour words (red, green, black, etc.) when the item is NOT a pepper, chili, onion, tomato, bell pepper, peas, pumpkin, salt, cardamom, mustard, grape, or lentil/dal variant. Colours are meaningful for those categories.
 
 ### Word removal list
-Strip: `twin pack, costco, restaurant depot, trader joe, organic, extra virgin, virgin, unsalted, salted, fresh, frozen, canned, shredded, diced, chopped, sliced, whole, peeled, flat leaf, baby, purée, puree, pantry, big, large, small, medium, packet, pack, bundle, mixed, english, long, mini, seedless, boneless, skinless`
+Strip: `twin pack, costco, restaurant depot, trader joe, patel, patel brothers, whole foods, kroger, walmart, organic, extra virgin, virgin, unsalted, salted, fresh, frozen, canned, plain, simple, regular, classic, shredded, diced, chopped, sliced, whole, peeled, flat leaf, baby, puree, pantry, big, large, small, medium, packet, pack, bundle, mixed, english, long, mini, seedless, boneless, skinless`
+
+Also strip prepositions/stop words including `from`: `from, or, and, of, the, a, an, with, in, on, for, to`
+
+**Why `plain`, `from`, and store/brand names were added:**
+- `"plain roti from patel"` must normalize to `"roti"` so it can match "Fresh Rotis" via synonym.
+- Without stripping `patel` and `from`, unmatched tokens tank the similarity score.
+- `plain` is a descriptor (like `fresh`) that adds no ingredient identity.
 
 **Protect exceptions:**
 - Keep `mixed` for bell peppers
@@ -125,13 +132,12 @@ for (const [masterKey, masterVal] of Object.entries(masterData.lookup)) {
     // "Kanda Lasun Masala (Onion Garlic)" base key = "kanda lasun masala"
     // Input "garlic" must NOT match this, even though the expanded text ends with "garlic".
     const baseKey = masterKey.replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (
-        baseKey === name ||
-        masterKey.toLowerCase() === name ||
-        baseKey.startsWith(name + ' ') ||
-        baseKey.endsWith(' ' + name) ||
-        baseKey.includes(' ' + name + ' ')
-    ) {
+    if (baseKey === name || masterKey.toLowerCase() === name) {
+        masterMatch = masterVal; break;
+    }
+    // Only additional case: hyphens/dashes in master key treated as spaces
+    const baseKeyDashNorm = baseKey.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+    if (baseKeyDashNorm === name) {
         masterMatch = masterVal; break;
     }
 }
@@ -145,7 +151,7 @@ for (const [masterKey, masterVal] of Object.entries(masterData.lookup)) {
 - `"garlic"` startsWith-matches `"Garlic Paste"`, `"Garlic Pods"` → wrong auto-match
 - `"garlic"` endsWith-matches `"Minced Garlic"` → wrong auto-match
 
-**Tier 2 must only match when `baseKey === name` exactly** (plus a dash-normalised variant). Everything else must fall through to fuzzy → resolver dialog.
+**Tier 2 must only match when `baseKey === name` exactly** (plus the dash-normalised variant). Everything else must fall through to fuzzy → resolver dialog.
 
 ### Edit-Distance Fallback Discount
 The edit-distance fallback score is multiplied by 0.95 to prevent borderline cases (raw score exactly 0.50) from squeezing into the resolver:
@@ -153,6 +159,8 @@ The edit-distance fallback score is multiplied by 0.95 to prevent borderline cas
 return ((longer.length - editDistance) / longer.length) * 0.95;
 ```
 **Why:** `"whole milk"` vs `"coconut milk"` has edit distance 6 over length 12 → raw score 0.500, exactly at the `>= 0.50` resolver threshold. With the 0.95 discount → 0.475, safely below threshold → not shown as a resolver candidate.
+
+---
 
 ### Tier 3 — Fuzzy match with category boost
 Auto-accept at >95% similarity. Show selection modal at 50–95%.
@@ -164,11 +172,14 @@ Auto-accept at >95% similarity. Show selection modal at 50–95%.
 All guards use `continue` to skip a master key entirely before scoring.
 
 ### Guard 1 — Compound masala/blend blocklist
+
+> ⚠️ **`powder` is intentionally NOT in this pattern.** Single-ingredient powders like "Turmeric Powder" and "Coriander Powder" must remain reachable when a user types "turmeric" or "coriander". The form-mismatch guard in `calculateSimilarity` already handles cases where the user explicitly types a conflicting form (e.g. `"turmeric seeds"` vs `"turmeric powder"`). Guard 1 must only block true compound blend names.
+
 ```js
-const isCompoundMasala = /\b(masala|blend|spice mix|seasoning|powder)\b/i.test(key);
+const isCompoundMasala = /\b(masala|blend|spice mix|seasoning)\b/i.test(key);
 const inputIsSimple = searchTerm.split(/\s+/).filter(w => w.length > 2).length <= 2;
 if (isCompoundMasala && inputIsSimple) {
-    if (!/(masala|spice|seasoning|blend|powder)/i.test(searchTerm)) continue;
+    if (!/(masala|spice|seasoning|blend)/i.test(searchTerm)) continue;
 }
 ```
 
@@ -198,6 +209,74 @@ if (brandNumberMatch) {
     if (calculateSimilarity(inputWithoutNum, keyWithoutNum) < 0.4) continue;
 }
 ```
+
+---
+
+## Synonym Table (in `fuzzyMatchWithCategory`)
+
+Synonyms redirect the `searchTerm` before all scoring. Longest-key-wins to prevent partial clobbers.
+
+```js
+const synonyms = {
+    // Cumin variants
+    'jira': 'cumin',
+    'jeera': 'cumin',
+    'zeera': 'cumin',
+    // Coriander — bare 'coriander' intentionally NOT mapped to cilantro;
+    // "coriander powder" and "coriander seeds" are distinct spices, not leaves.
+    'coriander leaf': 'cilantro',
+    'coriander leaves': 'cilantro',
+    'fresh coriander': 'cilantro',
+    'curry leaf': 'curry leaves',
+    'tomato': 'tomatoes',
+    // Legumes
+    'chickpea': 'garbanzo beans',
+    'chickpeas': 'garbanzo beans',
+    'garbanzo': 'garbanzo beans',
+    'garbanzos': 'garbanzo beans',
+    'lobia': 'black eyed peas',       // Hindi/Urdu regional name
+    'lobiya': 'black eyed peas',      // alternate spelling
+    'black eyed bean': 'black eyed peas',
+    'black eyed beans': 'black eyed peas',
+    // Cucumbers
+    'english cucumber': 'cucumbers english long',
+    'cucumber': 'cucumbers',
+    // Pasta
+    'penne pasta': 'pasta penne rigatoni elbow',
+    'penne': 'pasta penne',
+    'rigatoni': 'pasta penne',
+    'elbow pasta': 'pasta penne rigatoni elbow',
+    // Peppers
+    'mixed bell pepper': 'bell peppers mixed',
+    'bell pepper': 'bell peppers',
+    'capsicum': 'bell peppers',
+    // Butter
+    'butter sticks': 'unsalted butter sticks',
+    'butter': 'unsalted butter sticks',
+    'peanut butter': 'peanut butter',
+    'almond butter': 'almond butter',
+    'nut butter': 'nut butter',
+    // Alliums
+    'spring onion': 'green onions',
+    'spring onions': 'green onions',
+    'scallion': 'green onions',
+    'scallions': 'green onions',
+    // Rotis / flatbreads
+    'roti': 'rotis',
+    'rotis': 'rotis',
+    'chapati': 'rotis',
+    'chapatis': 'rotis',
+    // Coconut brand variants — "Daily Delight" is a brand, not a descriptor
+    'coconut daily delight': 'coconut shredded',
+    'daily delight coconut': 'coconut shredded',
+};
+```
+
+**Rules for adding synonyms:**
+- Use when a regional/Hindi/Urdu name has zero lexical overlap with the master key (e.g. `lobia` → `black eyed peas`).
+- Use when a brand name is embedded in the product description (e.g. `coconut daily delight` → `coconut shredded`).
+- Do NOT add a synonym just because similarity is low — fix normalization or scoring instead.
+- Always add the longest variant before shorter ones if there is overlap risk (e.g. `'english cucumber'` before `'cucumber'`).
 
 ---
 
@@ -246,6 +325,12 @@ function copyToGoogleSheets() {
 ### Master List (Read)
 - **Sheet ID**: `1yJyhd23X77zH_ITtQu1AtNTI-Ak9KnorymsPJgEJKMc`
 - **Tab**: `Master_Items` (range `Master_Items!A:F`)
+- **URL construction**:
+```js
+const range = 'Master_Items!A:F'; // Always this literal — NOT ${SHEET_NAME}!A:F
+const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?key=${apiKey}`;
+```
+> ⚠️ `SHEET_NAME` (`'Master List_Annapurna'`) is for display only. Never interpolate it into the API URL — the actual tab name is `Master_Items`. Always `encodeURIComponent` the range.
 - **Columns**: Items, Default Unit, Preferred Brand, Category, Preferred Store, Alt Store
 - **Auth**: Public API key (`const API_KEY`)
 - Loads automatically on mount if API key is set
@@ -280,6 +365,27 @@ Step 1: GET spreadsheet metadata → find unique tab name (never overwrite)
 Step 2: POST spreadsheets:batchUpdate → addSheet (create new tab)
 Step 3: PUT spreadsheets/values/{range} → write header + data rows (5 columns)
 Step 4: GET metadata → find sheetId → POST batchUpdate → formatting + freeze + auto-resize
+```
+
+---
+
+## Master Load Status UI
+
+Always show three distinct states — never let errors silently disappear into a generic warning:
+
+```jsx
+{masterData && (
+    <div className="bg-green-50 ...">✓ Loaded ({Object.keys(masterData.lookup).length} items)</div>
+)}
+{loadingMaster && (
+    <div className="bg-blue-50 ...">⏳ Loading master list…</div>
+)}
+{!masterData && !loadingMaster && masterError && (
+    <div className="bg-red-50 ...">✗ Failed to load master list: {masterError}</div>
+)}
+{!masterData && !loadingMaster && !masterError && (
+    <div className="bg-yellow-50 ...">⚠ Master data not loaded. Please configure API key in the code.</div>
+)}
 ```
 
 ---
@@ -403,9 +509,9 @@ const descriptors = ['frozen', 'fresh', 'canned', 'dried', 'raw', 'cooked',
 ```
 
 Examples:
-- "spinach" → "baby spinach" = 80%
-- "onion" → "red onion" = 80%
-- "potato" → "potato chips" = 60% (chips is not a descriptor)
+- `"spinach"` → `"baby spinach"` = 0.80 (fresh/frozen/baby are descriptors)
+- `"turmeric"` → `"fresh turmeric"` = 0.80, `"turmeric powder"` = 0.55 — **both shown in resolver**
+- `"potato"` → `"potato chips"` = 0.55 (chips is not a descriptor)
 
 ### Noun-Based Matching Priority
 ```javascript
@@ -431,55 +537,15 @@ Noun match boost: **+20%**. Category match boost: **+30%**.
 
 - Shows up to 8 matches when similarity is between 50–95%
 - **Blue highlight** for same-category matches with "Category Match" badge
-- **Bold** for items with noun match
 - Displays: Item name, similarity %, category, preferred store
 - User can select best match or skip to keep original name
-
----
-
-## Workflow: Match → Consolidate
-
-1. **Parse** — Extract ingredients from all input lists
-2. **Match** — Match each ingredient with master list (3-tier)
-3. **User Selection** — Modal for partial matches
-4. **Consolidate** — Combine items with same standardized name
-   - Same unit: Sum quantities (`5 lbs + 3 lbs = 8 lbs`)
-   - Different units: Comma-separated (`5 lbs, 3 count`)
-5. **Display** — Sorted final results
-
----
-
-## Common Bugs & Fixes
-
-| Bug | Root Cause | Fix |
-|---|---|---|
-| Items re-processed from old list state | Stale closure: `lists.forEach` after `setLists(numberedLists)` | Iterate `numberedLists` (local variable), not `lists` (React state) |
-| "baby corn" stripped to "corn", wrong match | `normalizeIngredientName` strips "baby" before Tier 2 lookup | Tier 2 full-phrase scan (including mid-phrase) catches "baby corn" before fuzzy |
-| "cucumber english long" loses "long" | `'long'` in removeWords, cucumber protection only rescued `'english'` | Splice `'long'` out of removeWords for cucumber items too |
-| "garlic pods" → "Kanda Lasun Masala (Onion Garlic)" | Masala blocklist insufficient | Guard 2: block if paren has 2+ ingredients and input doesn't match all |
-| "777 Sambhar Powder" → "Amchoor Powder 777" | Shared "777" and "powder" tokens inflated similarity | Guard 3: brand number requires both brand token AND base ingredient similarity ≥0.4 |
-| "Black Pepper (Red)" disappears | `(Red)` stripped before matching | Keep paren content inline; only strip known-meaningless annotations |
-| Submit writes 8 columns, table shows 5 | `submitToGoogleSheets` using different headers than table | Align to 5-column spec; set `numCols = 5` |
-| Copy to Sheets includes extra columns | `copyToGoogleSheets` not updated when table columns changed | Always update both table and copy function together |
-| ".5 lb" parsed as "5 count" | Regex `\d+\.?\d*` requires leading digit | Change to `\d*\.?\d+` in all quantity patterns |
-| "Green chilly" — "green" stripped incorrectly | `isChili` checked `chili`/`chilli` but not `chilly` | Add `chilly` to the `isChili` condition |
-| "Black pepper corns" stays as "black pepper corns" | "corns" left on name, master likely has "peppercorns" | Add normalization: `pepper corns` → `peppercorns` after word removal |
-| "Coriander powder" matched to "cilantro" variants | Synonym `'coriander': 'cilantro'` fires on any "coriander" string | Remove bare `'coriander'` synonym; only map `'coriander leaf'`/`'coriander leaves'`/`'fresh coriander'` |
-| "Thandai (45)" treated as pantry ingredient | `(45)` kept as inline content → "thandai 45" with no quantity → pantry | Add section-header guard: skip lines matching `^[A-Za-z][A-Za-z\s]*\s*\(\d+\)\s*$` with no dash |
-| "Capsicum" not mapped to bell peppers | Missing from synonym table | Add `'capsicum': 'bell peppers'` to synonyms |
-| "Spring Onion" not mapped to master key | Missing from synonym table | Add `'spring onion': 'green onions'`, `'scallion': 'green onions'` |
-
-| "garlic" → silently auto-matched to "Kanda Lasun Masala (Onion Garlic)" | Tier 2 expanded parens, making base key endsWith "garlic" → exact match, bypassing fuzzy guards | Tier 2 strips parens OFF entirely — only compares against base name |
-| "black peppercorns" auto-matched to "white peppercorns" | Same noun, "white" in descriptorSet → 0.85, boosts push to >0.95 | Color/qualifier guard: mismatched colors cap similarity at 0.50 |
-| "onion" auto-matched to "frozen small onions" | Raw 0.80 × noun boost × category boost = 1.0 → auto-match | Boost cap: rawSimilarity < 0.90 → clamp to 0.94 |
-
 
 ---
 
 ## New Guards Added to `calculateSimilarity`
 
 ### Form/Preparation Mismatch Guard
-Runs BEFORE similarity scoring. If both strings contain a "form" word and those forms differ, return 0.40 — below the resolver threshold.
+Runs BEFORE similarity scoring. If **both** strings contain a "form" word and those forms differ, return 0.40 — below the resolver threshold.
 
 ```js
 const formWords = new Set(['seeds','seed','oil','powder','paste','leaf','leaves',
@@ -492,6 +558,8 @@ if (str1Forms.length > 0 && str2Forms.length > 0) {
 }
 ```
 Examples blocked: `mustard seeds` vs `mustard oil`, `lemon juice` vs `lemon extract`, `coconut milk` vs `coconut cream`.
+
+> **Turmeric note:** `"turmeric"` (no form word) vs `"turmeric powder"` (one form word) → guard does NOT fire (requires both sides to have a form word) → resolver correctly shows both "Fresh Turmeric" (0.80) and "Turmeric Powder" (0.55).
 
 ### Generic Noun Boost Skip
 In `fuzzyMatchWithCategory`, noun boost (×1.2) is skipped when the input noun is a generic category word shared by many items:
@@ -514,13 +582,12 @@ if (!isGenericNoun && keyForMatch.includes(inputNoun)) {
 ```js
 const isMilk = normalized.includes('milk') || normalized.includes('cream') ||
                normalized.includes('dairy') || normalized.includes('yogurt') || normalized.includes('curd');
-// ...
 if (isMilk) {
     const idx = removeWords.indexOf('whole');
     if (idx > -1) removeWords.splice(idx, 1);
 }
 ```
-**Why:** `whole milk` → `whole` stripped → `milk` → matches `coconut milk` falsely. `whole` is meaningful for dairy.
+**Why:** `whole milk` → `whole` stripped → `milk` → matches `coconut milk` falsely.
 
 ---
 
@@ -540,11 +607,45 @@ Same bug exists for `boxes?` → fixed to `box(?:es)?`.
 | Input vs Master | Score | Goes to resolver? |
 |---|---|---|
 | `spinach` vs `baby spinach` (descriptor-only extra) | 0.80 | Yes |
-| `potato` vs `potato chips` (substantive extra, single form) | 0.55 | Yes, but ranks low |
+| `turmeric` vs `fresh turmeric` (fresh is descriptor) | 0.80 | Yes |
+| `turmeric` vs `turmeric powder` (powder not a descriptor) | 0.55 | Yes, ranks below fresh turmeric |
+| `potato` vs `potato chips` (substantive extra) | 0.55 | Yes, but ranks low |
 | `mustard seeds` vs `mustard oil` (different forms) | 0.40 | No — blocked |
 | `black peppercorns` vs `white peppercorns` (different color) | 0.50 | Yes, at boundary |
 | `melon seeds` vs `cumin seeds` (different noun, generic seed) | edit dist ~0.45 | No |
 | `whole milk` vs `coconut milk` (different noun, whole protected) | edit dist ~0.45 | No |
+
+---
+
+## Common Bugs & Fixes
+
+| Bug | Root Cause | Fix |
+|---|---|---|
+| Items re-processed from old list state | Stale closure: `lists.forEach` after `setLists(numberedLists)` | Iterate `numberedLists` (local variable), not `lists` (React state) |
+| "baby corn" stripped to "corn", wrong match | `normalizeIngredientName` strips "baby" before Tier 2 lookup | Tier 2 full-phrase scan catches "baby corn" before fuzzy |
+| "cucumber english long" loses "long" | `'long'` in removeWords, cucumber protection only rescued `'english'` | Splice `'long'` out of removeWords for cucumber items too |
+| "garlic pods" → "Kanda Lasun Masala (Onion Garlic)" | Masala blocklist insufficient | Guard 2: block if paren has 2+ ingredients and input doesn't match all |
+| "777 Sambhar Powder" → "Amchoor Powder 777" | Shared "777" and "powder" tokens inflated similarity | Guard 3: brand number requires both brand token AND base ingredient similarity ≥0.4 |
+| "Black Pepper (Red)" disappears | `(Red)` stripped before matching | Keep paren content inline; only strip known-meaningless annotations |
+| Submit writes 8 columns, table shows 5 | `submitToGoogleSheets` using different headers | Align to 5-column spec; set `numCols = 5` |
+| Copy to Sheets includes extra columns | `copyToGoogleSheets` not updated when columns changed | Always update both table and copy function together |
+| ".5 lb" parsed as "5 count" | Regex `\d+\.?\d*` requires leading digit | Change to `\d*\.?\d+` in all quantity patterns |
+| "Green chilly" — "green" stripped incorrectly | `isChili` checked `chili`/`chilli` but not `chilly` | Add `chilly` to the `isChili` condition |
+| "Black pepper corns" stays as-is | "corns" left on name | Add normalization: `pepper corns` → `peppercorns` after word removal |
+| "Coriander powder" matched to cilantro | Synonym `'coriander': 'cilantro'` fires on any "coriander" string | Remove bare `'coriander'` synonym; only map leaf/fresh variants |
+| "Thandai (45)" treated as pantry ingredient | `(45)` kept as inline content → "thandai 45" | Section-header guard: skip lines matching `^[A-Za-z][A-Za-z\s]*\s*\(\d+\)\s*$` with no dash |
+| "Capsicum" not mapped to bell peppers | Missing from synonym table | Add `'capsicum': 'bell peppers'` |
+| "Spring Onion" not mapped | Missing from synonym table | Add `'spring onion': 'green onions'`, `'scallion': 'green onions'` |
+| "garlic" → silently auto-matched to Kanda Lasun Masala | Tier 2 expanded parens, base key endsWith "garlic" | Tier 2 strips parens OFF — only compares base name |
+| "black peppercorns" auto-matched to "white peppercorns" | Color boost pushed score >0.95 | Color/qualifier guard: mismatched colors cap at 0.50 |
+| "onion" auto-matched to "frozen small onions" | Boost chain inflated to 1.0 | Boost cap: rawSimilarity < 0.90 → clamp to 0.94 |
+| Master load URL broken / dead variable | `range` variable computed from `SHEET_NAME` but not used | Always use `'Master_Items!A:F'` literal, wrap in `encodeURIComponent` |
+| API error silently swallowed | `masterError` state set but never displayed | Show 3 distinct states: loading (blue), error (red), unconfigured (yellow) |
+| "turmeric" can't reach "Turmeric Powder" in resolver | Guard 1 pattern included `powder` → blocked all `*Powder` master keys | Remove `powder` from Guard 1; it only needs to block masala/blend/seasoning |
+| "lobia beans dry" → no match | `lobia` has zero lexical overlap with "Black Eyed Peas" | Add `'lobia': 'black eyed peas'` (and `'lobiya'`) to synonyms |
+| "plain roti from patel" → no match | `plain`, `from`, `patel` left as unmatched tokens | Add `plain`, `from`, store/brand names to removeWords |
+| "coconut daily delight" → no match | "Daily Delight" is a brand, zero lexical overlap with "shredded" | Add `'coconut daily delight': 'coconut shredded'` to synonyms |
+| "roti" / "chapati" → no match for "Fresh Rotis" | No synonym for roti variants | Add `'roti': 'rotis'`, `'chapati': 'rotis'` to synonyms |
 
 ---
 
@@ -574,6 +675,16 @@ Same bug exists for `boxes?` → fixed to `box(?:es)?`.
 - [ ] "Spring Onion - 5 packets" → maps to green onions via synonym
 - [ ] "Fennel seeds" from lists 1 and 3 → quantities summed (360 gms + 500 gms = 860 gms)
 - [ ] "Garlic" across lists with different units (lb vs gms) → shown as "1 lbs, 250 gms"
+- [ ] "turmeric" → resolver shows BOTH "Fresh Turmeric" (0.80) AND "Turmeric Powder" (0.55)
+- [ ] "turmeric powder" → resolver shows "Turmeric Powder" at top (form guard blocks "Fresh Turmeric" since both have a form word? No — "turmeric powder" has powder, "fresh turmeric" has no form word → form guard does NOT fire → "Fresh Turmeric" still shows at 0.80, "Turmeric Powder" at 0.90+ → let user decide)
+- [ ] "lobia beans dry" → resolver shows "Black Eyed Peas"
+- [ ] "lobiya" → resolver shows "Black Eyed Peas"
+- [ ] "plain roti from patel" → normalizes to "roti" → resolver shows "Fresh Rotis"
+- [ ] "chapati" → resolver shows "Fresh Rotis" via synonym
+- [ ] "coconut daily delight" → resolver shows "Coconut Shredded (Frozen)"
+- [ ] Master load shows blue spinner while fetching
+- [ ] Master load shows red error with actual message if API key fails
+- [ ] Master load URL uses `encodeURIComponent('Master_Items!A:F')` — not SHEET_NAME
 
 ---
 
@@ -582,7 +693,7 @@ Same bug exists for `boxes?` → fixed to `box(?:es)?`.
 ```javascript
 // Master list (read-only, API key)
 const SHEET_ID = '1yJyhd23X77zH_ITtQu1AtNTI-Ak9KnorymsPJgEJKMc';
-const SHEET_NAME = 'Master List_Annapurna';
+const SHEET_NAME = 'Master List_Annapurna'; // display label only — NOT used in API URL
 const API_KEY = 'AIzaSyAxFgijOuH0PeE-wmK3DBG2XqmHNnnabyE';
 
 // Shopping sheet (write, OAuth)
